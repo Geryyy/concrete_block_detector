@@ -79,11 +79,30 @@ inline double rotation_angle_deg(const Eigen::Matrix3d & r)
 {
   return std::acos(std::clamp((r.trace() - 1.0) / 2.0, -1.0, 1.0)) * 57.2957795130823208768;
 }
-struct RefineResult {CuboidPose pose; bool refined{false};};
+// Facts captured before the correction safety guard.  Keeping them with the
+// result makes Python/C++ optimizer parity observable without changing the
+// published pose or the refinement decision.
+struct RefineDiagnostics
+{
+  bool attempted{false};
+  std::size_t point_count{0U};
+  std::size_t evaluations{0U};
+  std::size_t iterations{0U};
+  double initial_cost{std::numeric_limits<double>::quiet_NaN()};
+  double final_cost{std::numeric_limits<double>::quiet_NaN()};
+  std::array<double, 6> correction{{0.0, 0.0, 0.0, 0.0, 0.0, 0.0}};
+  double translation_norm{0.0};
+  double rotation_deg{0.0};
+  bool guard_accepted{false};
+};
+struct RefineResult {CuboidPose pose; bool refined{false}; RefineDiagnostics diagnostics;};
 
 inline RefineResult refine_pose(const CuboidPose & initial, const Points & points, const RefineParameters & params = {})
 {
-  if (points.size() < params.min_points || params.huber_scale <= 0.0 || params.max_evaluations < 7U) {return {initial, false};}
+  RefineDiagnostics diagnostics;
+  diagnostics.point_count = points.size();
+  if (points.size() < params.min_points || params.huber_scale <= 0.0 || params.max_evaluations < 7U) {return {initial, false, diagnostics};}
+  diagnostics.attempted = true;
   const Point half(initial.dims[0] / 2.0, initial.dims[1] / 2.0, initial.dims[2] / 2.0);
   const auto residuals = [&initial, &points, &half](const Eigen::Matrix<double, 6, 1> & x) {
       const Eigen::Matrix3d r = initial.rotation * exp_so3(x.head<3>());
@@ -94,8 +113,10 @@ inline RefineResult refine_pose(const CuboidPose & initial, const Points & point
   const auto cost_for = [&params](const std::vector<double> & values) {double total = 0.0; for (const double value : values) {total += huber_cost(value, params.huber_scale);} return total;};
   Eigen::Matrix<double, 6, 1> x = Eigen::Matrix<double, 6, 1>::Zero();
   std::vector<double> current = residuals(x); std::size_t evaluations = 1U; double cost = cost_for(current);
+  diagnostics.initial_cost = cost;
   constexpr double h = 1.0e-5;
   for (std::size_t iteration = 0; evaluations + 12U <= params.max_evaluations && iteration < 30U; ++iteration) {
+    diagnostics.iterations = iteration + 1U;
     Eigen::MatrixXd jacobian(points.size(), 6);
     for (int column = 0; column < 6; ++column) {
       auto plus = x; auto minus = x; plus[column] += h; minus[column] -= h;
@@ -119,9 +140,15 @@ inline RefineResult refine_pose(const CuboidPose & initial, const Points & point
     if (!accepted) {break;}
   }
   const Eigen::Matrix3d delta_rotation = exp_so3(x.head<3>());
-  if (x.tail<3>().norm() > params.max_translation || rotation_angle_deg(delta_rotation) > params.max_rotation_deg) {return {initial, false};}
+  diagnostics.evaluations = evaluations;
+  diagnostics.final_cost = cost;
+  for (int index = 0; index < 6; ++index) {diagnostics.correction[static_cast<std::size_t>(index)] = x[index];}
+  diagnostics.translation_norm = x.tail<3>().norm();
+  diagnostics.rotation_deg = rotation_angle_deg(delta_rotation);
+  if (diagnostics.translation_norm > params.max_translation || diagnostics.rotation_deg > params.max_rotation_deg) {return {initial, false, diagnostics};}
   CuboidPose refined = initial; refined.position += x.tail<3>(); refined.rotation *= delta_rotation; refined.source += "+sdf";
-  return {refined, true};
+  diagnostics.guard_accepted = true;
+  return {refined, true, diagnostics};
 }
 inline std::vector<CuboidPose> refine_poses(std::vector<CuboidPose> poses, const Points & points, double band = 0.10, std::size_t iterations = 2U, const RefineParameters & params = {})
 {

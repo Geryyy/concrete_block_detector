@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <sstream>
 
 #ifndef BLOCKPOSE_SOURCE_ROOT
 #error "BLOCKPOSE_SOURCE_ROOT must be set by CMake"
@@ -61,6 +62,29 @@ double symmetry_aware_angle_deg(const Eigen::Matrix3d & actual, const Eigen::Mat
   return result;
 }
 
+std::string solver_comparison(
+  const RefineDiagnostics & actual,
+  const nlohmann::json & expected)
+{
+  std::ostringstream stream;
+  stream << "python=" << expected.dump()
+         << " cxx={attempted=" << actual.attempted
+         << ", evaluations=" << actual.evaluations
+         << ", iterations=" << actual.iterations
+         << ", initial_cost=" << actual.initial_cost
+         << ", final_cost=" << actual.final_cost
+         << ", correction=[";
+  for (std::size_t index = 0; index < actual.correction.size(); ++index) {
+    if (index != 0U) {stream << ',';}
+    stream << actual.correction[index];
+  }
+  stream << "]"
+         << ", translation_norm=" << actual.translation_norm
+         << ", rotation_deg=" << actual.rotation_deg
+         << ", guard_accepted=" << actual.guard_accepted << '}';
+  return stream.str();
+}
+
 // This is intentionally a separate gate from detector parity. It supplies the
 // C++ optimizer with the exact Python selected initial poses and assignment
 // cloud, so a failure cannot be attributed to RANSAC, NMS, or association.
@@ -90,19 +114,36 @@ TEST(Refine, PythonSolverBoundaryParity)
     const Points points = load_xyz(fixture_dir / (id + ".refine_points.xyz"));
     ASSERT_FALSE(points.empty()) << id;
     ASSERT_EQ(current.size(), fixture.at("passes").front().at("poses").size()) << id;
+    std::size_t pass_index = 0U;
     for (const auto & pass : fixture.at("passes")) {
       const auto assigned = assign_points(current, points, 0.10);
       ASSERT_EQ(assigned.size(), pass.at("assigned_counts").size()) << id;
       for (std::size_t index = 0; index < current.size(); ++index) {
-        EXPECT_EQ(assigned[index].size(), pass.at("assigned_counts").at(index).get<std::size_t>())
-          << id << " assigned points";
+        if (assigned[index].size() != pass.at("assigned_counts").at(index).get<std::size_t>()) {
+          ADD_FAILURE() << id << " pass=" << pass_index << " candidate=" << index
+                        << " assigned_points cxx=" << assigned[index].size()
+                        << " python=" << pass.at("assigned_counts").at(index);
+          return;
+        }
         const auto actual = refine_pose(current[index], assigned[index]);
         const CuboidPose expected = cuboid_from_json(pass.at("poses").at(index));
-        EXPECT_EQ(actual.refined, pass.at("refined").at(index).get<bool>()) << id;
-        EXPECT_LE((actual.pose.position - expected.position).norm(), 0.005) << id;
-        EXPECT_LE(symmetry_aware_angle_deg(actual.pose.rotation, expected.rotation), 0.5) << id;
+        const auto & expected_solver = pass.at("solver").at(index);
+        const std::string detail = solver_comparison(actual.diagnostics, expected_solver);
+        const double position_error = (actual.pose.position - expected.position).norm();
+        const double rotation_error = symmetry_aware_angle_deg(actual.pose.rotation, expected.rotation);
+        if (actual.refined != pass.at("refined").at(index).get<bool>() ||
+          position_error > 0.005 || rotation_error > 0.5)
+        {
+          ADD_FAILURE() << id << " pass=" << pass_index << " candidate=" << index
+                        << " refined cxx=" << actual.refined
+                        << " python=" << pass.at("refined").at(index)
+                        << " position_error=" << position_error
+                        << " rotation_error_deg=" << rotation_error << ' ' << detail;
+          return;
+        }
         current[index] = actual.pose;
       }
+      ++pass_index;
     }
   }
 }
