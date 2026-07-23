@@ -14,19 +14,24 @@ concrete_block_detector:
     # Require the 0.9 m axis and at least one 0.6 m axis to be observed.
     minimum_long_axis_span_m: 0.70
     minimum_secondary_axis_span_m: 0.30
+    # Pose is synthesized from the fitted ground normal and points within this
+    # distance of the cluster's highest point. Side-face returns cannot rotate
+    # the block yaw as they did with whole-cluster PCA.
+    top_slab_thickness_m: 0.08
+    top_plane_distance_threshold_m: 0.02
+    top_slab_min_points: 12
     transform_timeout_s: 0.10
+    # Package defaults remain portable. Put site/bag-specific crops in an
+    # explicit launch overlay rather than silently baking them into discovery.
+    scene_bounds:
+      enabled: false
+      min_m: [-15.0, 2.0, 0.0]
+      max_m: [-10.0, 3.5, 1.5]
     # "cloudini" subscribes to points/cloudini and decodes it in-process via
     # point_cloud_transport. The standalone launch overrides this to "raw".
     point_cloud_transport: cloudini
-    # The detector writes coarse, free blocks to the canonical world model used
-    # by the wall planner and behavior tree. No legacy segmentation, cutout or
-    # registration services are part of this path.
-    world_model:
-      enabled: true
-      frame_id: world
-      get_coarse_blocks_service: /world_model_node/get_coarse_blocks
-      upsert_block_service: /world_model_node/upsert_block
-      id_prefix: detected_block_
-      association_max_distance_m: 0.45
-      cache_refresh_s: 1.0
-      confidence: 0.8
+    # The world model invokes this service for each explicit SCENE_DISCOVERY.
+    # Incoming clouds are cached only; they never autonomously change block state.
+    discover_service: ~/discover_blocks
+    # The published block confidence is the prototype evidence score.
+    refine_enabled: true

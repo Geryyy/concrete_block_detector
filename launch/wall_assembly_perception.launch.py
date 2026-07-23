@@ -52,7 +52,9 @@ def generate_launch_description():
                 parameters=[
                     LaunchConfiguration("world_model_params_file"),
                     LaunchConfiguration("world_model_overlay_params_file"),
-                    {"use_sim_time": LaunchConfiguration("use_sim_time")},
+                    {
+                        "use_sim_time": LaunchConfiguration("use_sim_time"),
+                    },
                 ],
                 remappings=[
                     ("block_world_model", "/cbp/block_world_model"),
@@ -70,11 +72,16 @@ def generate_launch_description():
                     LaunchConfiguration("detector_params_file"),
                     {
                         "use_sim_time": LaunchConfiguration("use_sim_time"),
-                        "world_model.enabled": True,
                         "point_cloud_transport": "cloudini",
                     },
                 ],
-                remappings=[("points", LaunchConfiguration("points_topic"))],
+                remappings=[
+                    ("points", LaunchConfiguration("points_topic")),
+                    (
+                        "points/cloudini",
+                        [LaunchConfiguration("points_topic"), "/cloudini"],
+                    ),
+                ],
                 output="screen",
             ),
         ]

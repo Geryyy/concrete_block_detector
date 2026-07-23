@@ -16,17 +16,13 @@ def generate_launch_description():
     )
     points_topic = DeclareLaunchArgument("points_topic", default_value="/seyond/points")
     transport = DeclareLaunchArgument("transport", default_value="raw")
-    world_model_enabled = DeclareLaunchArgument(
-        "world_model_enabled",
-        default_value="false",
-        description="Write detected blocks to world_model_node (the wall-assembly launch enables this).",
-    )
+    use_sim_time = DeclareLaunchArgument("use_sim_time", default_value="false")
     return LaunchDescription(
         [
             params_file,
             points_topic,
             transport,
-            world_model_enabled,
+            use_sim_time,
             Node(
                 package="concrete_block_detector",
                 executable="concrete_block_detector_node",
@@ -34,11 +30,19 @@ def generate_launch_description():
                 parameters=[
                     LaunchConfiguration("params_file"),
                     {
-                        "world_model.enabled": LaunchConfiguration("world_model_enabled"),
                         "point_cloud_transport": LaunchConfiguration("transport"),
+                        "use_sim_time": LaunchConfiguration("use_sim_time"),
                     },
                 ],
-                remappings=[("points", LaunchConfiguration("points_topic"))],
+                remappings=[
+                    ("points", LaunchConfiguration("points_topic")),
+                    # point_cloud_transport resolves plugin topics separately from
+                    # the base topic, so remap Cloudini explicitly as well.
+                    (
+                        "points/cloudini",
+                        [LaunchConfiguration("points_topic"), "/cloudini"],
+                    ),
+                ],
                 output="screen",
             ),
         ]

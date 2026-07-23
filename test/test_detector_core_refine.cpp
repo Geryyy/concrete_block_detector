@@ -1,0 +1,9 @@
+#include "concrete_block_detector/detector_core_refine.hpp"
+#include <gtest/gtest.h>
+namespace concrete_block_detector::detector_core { namespace {
+Points surface(const CuboidPose & pose) {Points p; Point h(pose.dims[0]/2.,pose.dims[1]/2.,pose.dims[2]/2.); auto add=[&](Point local){p.push_back(pose.position+pose.rotation*local);}; for(int x=-4;x<=4;++x)for(int y=-3;y<=3;++y)add(Point(h.x()*x/4.,h.y()*y/3.,h.z())); for(int y=-3;y<=3;++y)for(int z=-3;z<=3;++z)add(Point(h.x(),h.y()*y/3.,h.z()*z/3.)); return p;}
+TEST(Refine, SdfAndExpMatchPrototype) {Point h(.45,.3,.3); EXPECT_NEAR(box_sdf(Point(.45,0,0),h),0,1e-12); EXPECT_NEAR(box_sdf(Point(0,0,0),h),-.3,1e-12); EXPECT_NEAR(box_sdf(Point(.55,0,0),h),.1,1e-12); EXPECT_NEAR(rotation_angle_deg(exp_so3(Point(0,0,.2))),11.4591559,1e-6);}
+TEST(Refine, AssignmentUsesNearestSurfaceAndBand) {CuboidPose a,b;a.position=Point(-1,0,0);b.position=Point(1,0,0);auto owned=assign_points({a,b},{Point(-.55,0,0),Point(1.45,0,0),Point(0,4,0)},.1);EXPECT_EQ(owned[0].size(),1U);EXPECT_EQ(owned[1].size(),1U);}
+TEST(Refine, RobustFitCorrectsSmallPoseError) {CuboidPose truth;truth.position=Point(.2,-.1,.3);truth.rotation=exp_so3(Point(0,0,.22));truth.source="prototype";const auto points=surface(truth);CuboidPose initial=truth;initial.position+=Point(.045,-.035,.02);initial.rotation*=exp_so3(Point(0,0,-.1));const auto result=refine_pose(initial,points);ASSERT_TRUE(result.refined);EXPECT_LT((result.pose.position-truth.position).norm(),.006);EXPECT_LT(rotation_angle_deg(truth.rotation.transpose()*result.pose.rotation),.8);EXPECT_EQ(result.pose.source,"prototype+sdf");}
+TEST(Refine, FailuresKeepInitialPose) {CuboidPose pose;EXPECT_FALSE(refine_pose(pose,{Point::Zero()}).refined);const auto points=surface(pose);CuboidPose far=pose;far.position.x()=.5;const auto guarded=refine_pose(far,points);EXPECT_FALSE(guarded.refined);EXPECT_NEAR(guarded.pose.position.x(),.5,1e-12);}
+}}  // namespace

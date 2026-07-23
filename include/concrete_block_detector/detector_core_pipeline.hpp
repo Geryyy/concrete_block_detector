@@ -1,0 +1,141 @@
+#pragma once
+
+// Composition of the non-refinement DetectFree stages.  ROS converts clouds
+// into Points and calls this; it owns neither TF nor persistent world state.
+#include "concrete_block_detector/detector_core_proposals.hpp"
+#include "concrete_block_detector/detector_core_refine.hpp"
+
+#include <map>
+
+namespace concrete_block_detector::detector_core
+{
+struct PipelineCounts
+{
+  std::size_t input_points{0}, downsampled_points{0}, above_support_points{0};
+  std::size_t proposal_components{0}, plane_regions{0}, plane_fit_calls{0};
+  std::size_t plane_search_points{0}, plane_full_points_scored{0};
+  std::size_t plane_trials_evaluated{0}, plane_valid_trials{0};
+  std::size_t raw_hypotheses{0}, selected_hypotheses{0};
+};
+struct DetectionResult {std::vector<Pose> poses; std::vector<CuboidHypothesis> hypotheses; PipelineCounts counts; LocalGroundModel ground; Points above_support_points;};
+
+// Open3D tensor voxel downsampling averages every point in a floor-indexed
+// voxel.  Canonical sort makes the C++ result independent of input ordering.
+inline Points voxel_downsample(const Points & input, double voxel_size)
+{
+  if (!std::isfinite(voxel_size) || voxel_size <= 0.0) {throw std::invalid_argument("voxel_size must be positive");}
+  struct Accumulator {Point sum{Point::Zero()}; std::size_t count{0};};
+  std::map<std::tuple<long long, long long, long long>, Accumulator> voxels;
+  for (const auto & input_point : input) {
+    // blockpose _voxel_downsample explicitly converts float64 input to the
+    // Open3D tensor float32 representation before voxel hashing/averaging.
+    // Hashing the original doubles changes cells at boundaries.
+    const Point point(
+      static_cast<double>(static_cast<float>(input_point.x())),
+      static_cast<double>(static_cast<float>(input_point.y())),
+      static_cast<double>(static_cast<float>(input_point.z())));
+    if (!point.allFinite()) {throw std::invalid_argument("points must be finite");}
+    const auto index = std::make_tuple(static_cast<long long>(std::floor(point.x() / voxel_size)), static_cast<long long>(std::floor(point.y() / voxel_size)), static_cast<long long>(std::floor(point.z() / voxel_size)));
+    auto & value = voxels[index]; value.sum += point; ++value.count;
+  }
+  Points output; output.reserve(voxels.size()); for (const auto & [_, value] : voxels) {output.push_back(value.sum / static_cast<double>(value.count));}
+  return canonical_order(std::move(output));
+}
+
+inline std::vector<Points> split_connected_row(const Points & cluster, const DetectionParameters & params)
+{
+  const auto e = extent(cluster); const std::size_t axis = e[0] >= e[1] ? 0U : 1U;
+  const double width = params.block_dims[axis]; const int count = static_cast<int>(std::llround(e[axis] / width));
+  if (count < 2 || count > 8 || std::abs(e[axis] - count * width) > .12) {return {cluster};}
+  double low = std::numeric_limits<double>::infinity(); for (const auto & point : cluster) {low = std::min(low, point[static_cast<Eigen::Index>(axis)]);}
+  const double valley_half = std::max(params.voxel_size * 1.5, .04), shoulder = std::max(params.voxel_size * 3., .08);
+  for (int section = 1; section < count; ++section) {
+    const double boundary = low + section * width; std::size_t valley = 0, left = 0, right = 0;
+    for (const auto & point : cluster) {const double value = point[static_cast<Eigen::Index>(axis)]; if (std::abs(value - boundary) <= valley_half) {++valley;} if (value >= boundary - shoulder - valley_half && value < boundary - valley_half) {++left;} if (value > boundary + valley_half && value <= boundary + shoulder + valley_half) {++right;}}
+    const double expected = static_cast<double>(left + right) * valley_half / shoulder;
+    if (expected <= 0.0 || valley > .45 * expected) {return {cluster};}
+  }
+  std::vector<Points> result; for (int section = 0; section < count; ++section) {const double begin = low + section * width, end = low + (section + 1) * width; Points region; for (const auto & point : cluster) {const double value = point[static_cast<Eigen::Index>(axis)]; if (value >= begin - 1e-6 && (value <= end + (section == count - 1 ? 1e-6 : 0.0))) {region.push_back(point);}} if (region.size() >= params.cluster_min_size) {result.push_back(std::move(region));}}
+  return result.size() == static_cast<std::size_t>(count) ? result : std::vector<Points>{cluster};
+}
+
+inline DetectionResult detect_without_refinement(const Points & input, const DetectionParameters & params = {})
+{
+  DetectionResult result; result.counts.input_points = input.size();
+  if (input.size() < 3U) {return result;}
+  const Points downsampled = voxel_downsample(input, params.voxel_size); result.counts.downsampled_points = downsampled.size();
+  if (downsampled.size() < 3U) {return result;}
+  GroundParameters ground_params; ground_params.thickness = .15; ground_params.ransac_distance = .05; ground_params.ransac_iterations = 500; ground_params.ransac_seed = params.ransac_seed; ground_params.local_cell_size = .5; ground_params.local_clearance = .05;
+  const Points coarse_ground = voxel_downsample(downsampled, .1);
+  const GroundRemovalResult removed = remove_ground(downsampled, ground_params, &coarse_ground); result.ground = removed.ground; result.above_support_points = removed.above_ground; result.counts.above_support_points = removed.above_ground.size();
+  if (removed.above_ground.empty()) {return result;}
+  const auto proposals = dbscan_proposals(removed.above_ground, params, &result.ground); result.counts.proposal_components = proposals.size();
+  std::vector<CuboidHypothesis> raw;
+  for (const auto & proposal : proposals) {
+    const auto regions = split_connected_row(proposal, params);
+    const auto proposal_extent = extent(proposal);
+    // Match _detect_blocks_impl: a connected region wider than a single block
+    // is only admissible when the density-valley splitter supplied observable
+    // boundaries.  Do not tile a seamless long object into known cuboids.
+    if (regions.size() == 1U &&
+      (proposal_extent[0] > params.cluster_max_extent_xy ||
+      proposal_extent[1] > params.cluster_max_extent_xy))
+    {
+      continue;
+    }
+    for (const auto & region : regions) {
+      ++result.counts.plane_regions; const auto [planes, counts] = fit_planes(region, params);
+      result.counts.plane_fit_calls += counts.calls; result.counts.plane_search_points += counts.search_points; result.counts.plane_full_points_scored += counts.full_points_scored; result.counts.plane_trials_evaluated += counts.trials_evaluated; result.counts.plane_valid_trials += counts.valid_trials;
+      for (const auto & dims : candidate_dims(params)) {for (const auto & pair : candidate_plane_sets(planes, params, result.ground, dims)) {
+        Points local_support = region;
+        if (pair.second != nullptr) {local_support = pair.first->points; local_support.insert(local_support.end(), pair.second->points.begin(), pair.second->points.end());}
+        const auto pose = synthesize_pose(*pair.first, pair.second, local_support, dims); const std::size_t support = pair.first->points.size() + (pair.second == nullptr ? 0U : pair.second->points.size()); const auto hypothesis = make_hypothesis(pose, support, result.ground, pair.second == nullptr ? 1U : 2U);
+        const double top_height = result.ground.height(pair.first->centroid); const bool supported = !(top_height <= dims[2] * 1.1 && std::abs(hypothesis.support_height_m) > .135);
+        if (top_height >= dims[2] * .70 && supported) {raw.push_back(hypothesis);}
+      }}
+    }
+  }
+  result.counts.raw_hypotheses = raw.size(); std::vector<CuboidHypothesis> thresholded; for (const auto & hypothesis : raw) {if (hypothesis.evidence.score >= params.min_score) {thresholded.push_back(hypothesis);}}
+  result.hypotheses = select_hypotheses(std::move(thresholded));
+  result.hypotheses.erase(std::remove_if(result.hypotheses.begin(), result.hypotheses.end(), [&result](const auto & hypothesis) {return result.ground.height(hypothesis.pose.position) < 0.0 || result.ground.height(hypothesis.pose.position) > 3.0;}), result.hypotheses.end());
+  std::sort(result.hypotheses.begin(), result.hypotheses.end(), [](const auto & a, const auto & b) {return a.pose.position.z() > b.pose.position.z();}); for (const auto & hypothesis : result.hypotheses) {result.poses.push_back(hypothesis.pose);} result.counts.selected_hypotheses = result.hypotheses.size(); return result;
+}
+
+inline DetectionResult detect(const Points & input, const DetectionParameters & params = {})
+{
+  DetectionResult result = detect_without_refinement(input, params);
+  if (result.hypotheses.empty()) {return result;}
+  std::vector<CuboidPose> initial;
+  initial.reserve(result.hypotheses.size());
+  for (const auto & hypothesis : result.hypotheses) {
+    initial.push_back({hypothesis.pose.position, hypothesis.pose.rotation, hypothesis.pose.dims,
+      hypothesis.pose.confidence, "plane_fit"});
+  }
+  const auto refined = refine_poses(std::move(initial), result.above_support_points);
+  std::vector<CuboidHypothesis> rescored;
+  rescored.reserve(result.hypotheses.size());
+  for (std::size_t index = 0; index < result.hypotheses.size(); ++index) {
+    Pose pose = result.hypotheses[index].pose;
+    pose.position = refined[index].position;
+    pose.rotation = refined[index].rotation;
+    pose.dims = refined[index].dims;
+    const auto & prior = result.hypotheses[index];
+    auto hypothesis = make_hypothesis(
+      pose, prior.evidence.support_points, result.ground,
+      prior.evidence.observed_geometry_faces);
+    if (result.ground.height(pose.position) >= 0.0 &&
+      result.ground.height(pose.position) <= params.cluster_max_center_z)
+    {
+      rescored.push_back(std::move(hypothesis));
+    }
+  }
+  result.hypotheses = select_hypotheses(std::move(rescored));
+  std::sort(result.hypotheses.begin(), result.hypotheses.end(), [](const auto & a, const auto & b) {
+    return a.pose.position.z() > b.pose.position.z();
+  });
+  result.poses.clear();
+  for (const auto & hypothesis : result.hypotheses) {result.poses.push_back(hypothesis.pose);}
+  result.counts.selected_hypotheses = result.hypotheses.size();
+  return result;
+}
+}  // namespace concrete_block_detector::detector_core

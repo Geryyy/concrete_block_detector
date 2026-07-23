@@ -1,0 +1,8 @@
+#include "concrete_block_detector/detector_core_pipeline.hpp"
+#include <gtest/gtest.h>
+#include <algorithm>
+namespace concrete_block_detector::detector_core {namespace {
+Points synthetic_block_with_ground() {Points points; for (int x = -30; x <= 30; ++x) {for (int y = -30; y <= 30; ++y) {points.emplace_back(x * .04, y * .04, 0.);}} for (int x = 0; x <= 22; ++x) {for (int y = 0; y <= 15; ++y) {points.emplace_back(-.44 + x * .04, -.3 + y * .04, .6);}} for (int y = 0; y <= 15; ++y) {for (int z = 0; z <= 15; ++z) {points.emplace_back(.45, -.3 + y * .04, z * .04);}} return points;}
+TEST(DetectorCorePipeline, VoxelOutputIsCanonicalAndInputOrderIndependent) {Points first{Point(.01,.01,.01), Point(.03,.03,.03), Point(.12,.01,.01)}; auto second = first; std::reverse(second.begin(), second.end()); const auto down_a = voxel_downsample(first, .1), down_b = voxel_downsample(second, .1); ASSERT_EQ(down_a.size(), 2U); ASSERT_EQ(down_a.size(), down_b.size()); EXPECT_NEAR((down_a[0] - down_b[0]).norm(), 0., 1e-12); EXPECT_NEAR(down_a[0].x(), .02, 1e-12);}
+TEST(DetectorCorePipeline, ComposesGroundProposalPlaneAndSelectionStages) {DetectionParameters params; params.min_inliers = 30; params.ransac_iterations = 600; const auto result = detect_without_refinement(synthetic_block_with_ground(), params); EXPECT_GT(result.counts.downsampled_points, 100U); EXPECT_GT(result.counts.above_support_points, 100U); EXPECT_GE(result.counts.proposal_components, 1U); EXPECT_GT(result.counts.plane_fit_calls, 0U); EXPECT_GE(result.counts.raw_hypotheses, 1U); ASSERT_FALSE(result.poses.empty()); EXPECT_NEAR(result.poses.front().position.z(), .3, .06);}
+}}  // namespace concrete_block_detector::detector_core
