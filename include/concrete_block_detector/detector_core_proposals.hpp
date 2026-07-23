@@ -34,7 +34,24 @@ struct DetectionParameters
 struct PlanePatch {Point normal{Point::UnitZ()}; Point centroid{Point::Zero()}; Points points; double residual_mad{0.0};};
 struct Pose {Point position{Point::Zero()}; Eigen::Matrix3d rotation{Eigen::Matrix3d::Identity()}; std::array<double, 3> dims{{0.9, 0.6, 0.6}}; double confidence{1.0};};
 struct HypothesisEvidence {std::size_t support_points{0}; double top_height_error_m{0.0}, score{0.0}; std::size_t expected_visible_faces{0}, covered_visible_faces{0}, free_space_violations{0}, supported_rays{0}, observed_geometry_faces{0}, incident_rays{0};};
-struct CuboidHypothesis {Pose pose; HypothesisEvidence evidence; std::optional<double> proposal_scale_m; double support_height_m{0.0};};
+// A provenance record is deliberately kept separate from the numerical
+// hypothesis.  It makes a Python/C++ pre-refinement disagreement inspectable
+// without changing any score, threshold, or selection behaviour.
+struct RawHypothesisLineage
+{
+  std::string id;
+  std::size_t proposal_component{0}, region{0}, top_plane{0};
+  std::optional<std::size_t> side_plane;
+  Point top_normal{Point::UnitZ()}, top_centroid{Point::Zero()};
+  std::optional<Point> side_normal, side_centroid;
+  std::array<double, 3> candidate_dims{{0.9, 0.6, 0.6}};
+  bool top_only{false}, accepted_to_raw{false}, passed_score_threshold{false};
+  Pose synthesized_pose;
+  HypothesisEvidence evidence;
+  double top_support_height_m{0.0};
+  std::string fate{"geometric_rejected"};
+};
+struct CuboidHypothesis {Pose pose; HypothesisEvidence evidence; std::optional<double> proposal_scale_m; double support_height_m{0.0}; std::optional<std::size_t> lineage_index;};
 struct PlaneFitCounts {std::size_t calls{0}, search_points{0}, full_points_scored{0}, trials_evaluated{0}, valid_trials{0};};
 
 // Direct port of blockpose._canonicalize_pose.  The swapped horizontal

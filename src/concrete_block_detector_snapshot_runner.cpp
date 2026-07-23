@@ -261,6 +261,27 @@ json pose_json(const detector_core::CuboidHypothesis & hypothesis)
   };
 }
 
+json raw_lineage_json(const detector_core::RawHypothesisLineage & lineage)
+{
+  const auto pose = pose_json(detector_core::CuboidHypothesis{
+    lineage.synthesized_pose, lineage.evidence, {}, 0.0, {}});
+  return {
+    {"id", lineage.id},
+    {"proposal_component", lineage.proposal_component}, {"region", lineage.region},
+    {"top_plane", lineage.top_plane},
+    {"side_plane", lineage.side_plane ? json(*lineage.side_plane) : json(nullptr)},
+    {"top_normal", {lineage.top_normal.x(), lineage.top_normal.y(), lineage.top_normal.z()}},
+    {"top_centroid", {lineage.top_centroid.x(), lineage.top_centroid.y(), lineage.top_centroid.z()}},
+    {"side_normal", lineage.side_normal ? json({lineage.side_normal->x(), lineage.side_normal->y(), lineage.side_normal->z()}) : json(nullptr)},
+    {"side_centroid", lineage.side_centroid ? json({lineage.side_centroid->x(), lineage.side_centroid->y(), lineage.side_centroid->z()}) : json(nullptr)},
+    {"candidate_dims", lineage.candidate_dims}, {"top_only", lineage.top_only},
+    {"synthesized_pose", pose},
+    {"top_support_height_m", lineage.top_support_height_m},
+    {"accepted_to_raw", lineage.accepted_to_raw},
+    {"passed_score_threshold", lineage.passed_score_threshold}, {"fate", lineage.fate},
+  };
+}
+
 json counts_json(const detector_core::PipelineCounts & counts)
 {
   return {{"input_points", counts.input_points}, {"downsampled_points", counts.downsampled_points}, {"above_support_points", counts.above_support_points}, {"proposal_components", counts.proposal_components}, {"plane_regions", counts.plane_regions}, {"plane_fit_calls", counts.plane_fit_calls}, {"plane_search_points", counts.plane_search_points}, {"plane_full_points_scored", counts.plane_full_points_scored}, {"plane_trials_evaluated", counts.plane_trials_evaluated}, {"plane_valid_trials", counts.plane_valid_trials}, {"raw_hypotheses", counts.raw_hypotheses}, {"refinement_candidates", counts.refinement_candidates}, {"selected_hypotheses", counts.selected_hypotheses}};
@@ -282,6 +303,8 @@ json run_snapshot(const std::filesystem::path & snapshot, const RuntimeParameter
   const auto elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
   json poses = json::array();
   for (const auto & hypothesis : detection.hypotheses) {poses.push_back(pose_json(hypothesis));}
+  json raw_lineage = json::array();
+  for (const auto & lineage : detection.raw_lineage) {raw_lineage.push_back(raw_lineage_json(lineage));}
   return {
     {"snapshot", snapshot.filename().string()},
     {"snapshot_path", snapshot.string()},
@@ -296,7 +319,7 @@ json run_snapshot(const std::filesystem::path & snapshot, const RuntimeParameter
     {"scene_bounds_enabled", runtime.scene_bounds_enabled},
     {"runtime_ms", elapsed},
     {"counts", counts_json(detection.counts)},
-    {"poses", poses},
+    {"poses", poses}, {"raw_lineage", raw_lineage},
   };
 }
 }  // namespace

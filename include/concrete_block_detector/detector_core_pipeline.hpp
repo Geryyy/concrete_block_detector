@@ -17,7 +17,7 @@ struct PipelineCounts
   std::size_t plane_trials_evaluated{0}, plane_valid_trials{0};
   std::size_t raw_hypotheses{0}, refinement_candidates{0}, selected_hypotheses{0};
 };
-struct DetectionResult {std::vector<Pose> poses; std::vector<CuboidHypothesis> hypotheses; PipelineCounts counts; LocalGroundModel ground; Points above_support_points;};
+struct DetectionResult {std::vector<Pose> poses; std::vector<CuboidHypothesis> hypotheses; PipelineCounts counts; LocalGroundModel ground; Points above_support_points; std::vector<RawHypothesisLineage> raw_lineage;};
 
 // Open3D tensor voxel downsampling averages every point in a floor-indexed
 // voxel.  Canonical sort makes the C++ result independent of input ordering.
@@ -99,7 +99,8 @@ inline DetectionResult detect_without_refinement(
   const auto proposals = dbscan_proposals(proposal_seed, params, &result.ground);
   result.counts.proposal_components = proposals.size();
   std::vector<CuboidHypothesis> raw;
-  for (const auto & proposal : proposals) {
+  for (std::size_t proposal_index = 0; proposal_index < proposals.size(); ++proposal_index) {
+    const auto & proposal = proposals[proposal_index];
     const auto regions = split_connected_row(proposal, params);
     const auto proposal_extent = extent(proposal);
     // Match _detect_blocks_impl: a connected region wider than a single block
@@ -111,22 +112,37 @@ inline DetectionResult detect_without_refinement(
     {
       continue;
     }
-    for (const auto & region : regions) {
+    for (std::size_t region_index = 0; region_index < regions.size(); ++region_index) {
+      const auto & region = regions[region_index];
       ++result.counts.plane_regions; const auto [planes, counts] = fit_planes(region, params);
       result.counts.plane_fit_calls += counts.calls; result.counts.plane_search_points += counts.search_points; result.counts.plane_full_points_scored += counts.full_points_scored; result.counts.plane_trials_evaluated += counts.trials_evaluated; result.counts.plane_valid_trials += counts.valid_trials;
-      for (const auto & dims : candidate_dims(params)) {for (const auto & pair : candidate_plane_sets(planes, params, result.ground, dims)) {
+      const auto dims_values = candidate_dims(params);
+      for (std::size_t dims_index = 0; dims_index < dims_values.size(); ++dims_index) {const auto & dims = dims_values[dims_index]; for (const auto & pair : candidate_plane_sets(planes, params, result.ground, dims)) {
         Points local_support = region;
         if (pair.second != nullptr) {local_support = pair.first->points; local_support.insert(local_support.end(), pair.second->points.begin(), pair.second->points.end());}
-        const auto pose = canonicalize_pose(synthesize_pose(*pair.first, pair.second, local_support, dims)); const std::size_t support = pair.first->points.size() + (pair.second == nullptr ? 0U : pair.second->points.size()); const auto hypothesis = make_hypothesis(pose, support, result.ground, pair.second == nullptr ? 1U : 2U, sensor_context);
+        const auto pose = canonicalize_pose(synthesize_pose(*pair.first, pair.second, local_support, dims)); const std::size_t support = pair.first->points.size() + (pair.second == nullptr ? 0U : pair.second->points.size()); auto hypothesis = make_hypothesis(pose, support, result.ground, pair.second == nullptr ? 1U : 2U, sensor_context);
         const double top_height = result.ground.height(pair.first->centroid); const bool supported = !(top_height <= dims[2] * 1.1 && std::abs(hypothesis.support_height_m) > .135);
-        if (top_height >= dims[2] * .70 && supported) {raw.push_back(hypothesis);}
+        const std::size_t top_index = static_cast<std::size_t>(pair.first - planes.data());
+        const std::optional<std::size_t> side_index = pair.second == nullptr ? std::nullopt : std::optional<std::size_t>(static_cast<std::size_t>(pair.second - planes.data()));
+        RawHypothesisLineage lineage;
+        lineage.id = "component-" + std::to_string(proposal_index) + "/region-" + std::to_string(region_index) + "/dims-" + std::to_string(dims_index) + "/top-" + std::to_string(top_index) + "/side-" + (side_index ? std::to_string(*side_index) : "none");
+        lineage.proposal_component = proposal_index; lineage.region = region_index; lineage.top_plane = top_index; lineage.side_plane = side_index;
+        lineage.top_normal = pair.first->normal; lineage.top_centroid = pair.first->centroid;
+        if (pair.second != nullptr) {lineage.side_normal = pair.second->normal; lineage.side_centroid = pair.second->centroid;}
+        lineage.candidate_dims = dims; lineage.top_only = pair.second == nullptr; lineage.synthesized_pose = pose; lineage.evidence = hypothesis.evidence; lineage.top_support_height_m = top_height;
+        lineage.accepted_to_raw = top_height >= dims[2] * .70 && supported;
+        lineage.fate = lineage.accepted_to_raw ? "raw" : "geometric_rejected";
+        result.raw_lineage.push_back(std::move(lineage));
+        if (result.raw_lineage.back().accepted_to_raw) {hypothesis.lineage_index = result.raw_lineage.size() - 1U; raw.push_back(std::move(hypothesis));}
       }}
     }
   }
-  result.counts.raw_hypotheses = raw.size(); std::vector<CuboidHypothesis> thresholded; for (const auto & hypothesis : raw) {if (hypothesis.evidence.score >= params.min_score) {thresholded.push_back(hypothesis);}}
+  result.counts.raw_hypotheses = raw.size(); std::vector<CuboidHypothesis> thresholded; for (const auto & hypothesis : raw) {if (hypothesis.evidence.score >= params.min_score) {thresholded.push_back(hypothesis); if (hypothesis.lineage_index) {auto & lineage = result.raw_lineage[*hypothesis.lineage_index]; lineage.passed_score_threshold = true; lineage.fate = "score_passed";}} else if (hypothesis.lineage_index) {result.raw_lineage[*hypothesis.lineage_index].fate = "score_rejected";}}
   result.hypotheses = select_conflict_alternatives(std::move(thresholded), params.conflict_alternatives);
+  for (const auto & hypothesis : result.hypotheses) {if (hypothesis.lineage_index) {result.raw_lineage[*hypothesis.lineage_index].fate = "pre_refinement_selected";}}
+  for (auto & lineage : result.raw_lineage) {if (lineage.fate == "score_passed") {lineage.fate = "pre_refinement_selection_rejected";}}
   result.counts.refinement_candidates = result.hypotheses.size();
-  result.hypotheses.erase(std::remove_if(result.hypotheses.begin(), result.hypotheses.end(), [&result, &params](const auto & hypothesis) {return result.ground.height(hypothesis.pose.position) < 0.0 || result.ground.height(hypothesis.pose.position) > params.cluster_max_center_z;}), result.hypotheses.end());
+  result.hypotheses.erase(std::remove_if(result.hypotheses.begin(), result.hypotheses.end(), [&result, &params](const auto & hypothesis) {const bool rejected = result.ground.height(hypothesis.pose.position) < 0.0 || result.ground.height(hypothesis.pose.position) > params.cluster_max_center_z; if (rejected && hypothesis.lineage_index) {result.raw_lineage[*hypothesis.lineage_index].fate = "pre_refinement_bounds_rejected";} return rejected;}), result.hypotheses.end());
   std::sort(result.hypotheses.begin(), result.hypotheses.end(), [](const auto & a, const auto & b) {return a.pose.position.z() > b.pose.position.z();}); for (const auto & hypothesis : result.hypotheses) {result.poses.push_back(hypothesis.pose);} result.counts.selected_hypotheses = result.hypotheses.size(); return result;
 }
 
@@ -161,13 +177,17 @@ inline DetectionResult detect(
     auto hypothesis = make_hypothesis(
       pose, prior.evidence.support_points, result.ground,
       prior.evidence.observed_geometry_faces, sensor_context);
+    hypothesis.lineage_index = prior.lineage_index;
     if (result.ground.height(pose.position) >= 0.0 &&
       result.ground.height(pose.position) <= params.cluster_max_center_z)
     {
       rescored.push_back(std::move(hypothesis));
     }
   }
+  for (const auto & hypothesis : rescored) {if (hypothesis.lineage_index) {result.raw_lineage[*hypothesis.lineage_index].fate = "post_refinement_candidate";}}
   result.hypotheses = select_hypotheses(std::move(rescored));
+  for (auto & lineage : result.raw_lineage) {if (lineage.fate == "post_refinement_candidate") {lineage.fate = "post_refinement_nms_rejected";}}
+  for (const auto & hypothesis : result.hypotheses) {if (hypothesis.lineage_index) {result.raw_lineage[*hypothesis.lineage_index].fate = "final";}}
   std::sort(result.hypotheses.begin(), result.hypotheses.end(), [](const auto & a, const auto & b) {
     return a.pose.position.z() > b.pose.position.z();
   });

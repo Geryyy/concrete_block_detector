@@ -105,6 +105,24 @@ int run_case(const std::filesystem::path & fixture_dir, const std::string & id)
   }
   const auto actual_result = cb::detect_without_refinement(points);
   const auto & actual = actual_result.poses;
+  if (std::getenv("CBP_EMIT_RAW_LINEAGE") != nullptr) {
+    nlohmann::json lineage = nlohmann::json::array();
+    for (const auto & item : actual_result.raw_lineage) {
+      lineage.push_back({
+        {"id", item.id}, {"proposal_component", item.proposal_component}, {"region", item.region},
+        {"top_plane", item.top_plane}, {"side_plane", item.side_plane ? nlohmann::json(*item.side_plane) : nlohmann::json(nullptr)},
+        {"top_normal", {item.top_normal.x(), item.top_normal.y(), item.top_normal.z()}},
+        {"top_centroid", {item.top_centroid.x(), item.top_centroid.y(), item.top_centroid.z()}},
+        {"side_normal", item.side_normal ? nlohmann::json({item.side_normal->x(), item.side_normal->y(), item.side_normal->z()}) : nlohmann::json(nullptr)},
+        {"side_centroid", item.side_centroid ? nlohmann::json({item.side_centroid->x(), item.side_centroid->y(), item.side_centroid->z()}) : nlohmann::json(nullptr)},
+        {"candidate_dims", item.candidate_dims}, {"top_only", item.top_only},
+        {"position", {item.synthesized_pose.position.x(), item.synthesized_pose.position.y(), item.synthesized_pose.position.z()}},
+        {"rotation", {{item.synthesized_pose.rotation(0, 0), item.synthesized_pose.rotation(0, 1), item.synthesized_pose.rotation(0, 2)}, {item.synthesized_pose.rotation(1, 0), item.synthesized_pose.rotation(1, 1), item.synthesized_pose.rotation(1, 2)}, {item.synthesized_pose.rotation(2, 0), item.synthesized_pose.rotation(2, 1), item.synthesized_pose.rotation(2, 2)}}},
+        {"score", item.evidence.score}, {"accepted_to_raw", item.accepted_to_raw}, {"passed_score_threshold", item.passed_score_threshold}, {"fate", item.fate},
+      });
+    }
+    std::cout << "raw_lineage=" << lineage.dump() << "\n";
+  }
   std::cout << std::fixed << std::setprecision(3);
   std::cout << id << " pre_refinement python=" << expected.size() << " cpp=" << actual.size()
             << " raw_hypotheses=" << actual_result.counts.raw_hypotheses
