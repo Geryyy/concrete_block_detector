@@ -103,10 +103,12 @@ ConcreteBlockDetectorNode::ConcreteBlockDetectorNode(const rclcpp::NodeOptions &
     }()),
   point_cloud_transport_name_(declare_parameter<std::string>("point_cloud_transport", "raw")),
   discover_service_(declare_parameter<std::string>("discover_service", "~/discover_blocks")),
+  cached_cloud_max_age_s_(declare_parameter<double>("cached_cloud_max_age_s", 2.0)),
   refine_enabled_(declare_parameter<bool>("refine_enabled", true)),
   tf_buffer_(get_clock()), tf_listener_(tf_buffer_)
 {
-  if (world_frame_.empty() || transform_timeout_s_ < 0.0 || point_cloud_transport_name_.empty() || discover_service_.empty() ||
+  if (world_frame_.empty() || transform_timeout_s_ < 0.0 || !std::isfinite(cached_cloud_max_age_s_) ||
+    cached_cloud_max_age_s_ <= 0.0 || point_cloud_transport_name_.empty() || discover_service_.empty() ||
     scene_bounds_min_m_[0] > scene_bounds_max_m_[0] || scene_bounds_min_m_[1] > scene_bounds_max_m_[1] || scene_bounds_min_m_[2] > scene_bounds_max_m_[2])
   {throw std::invalid_argument("invalid concrete_block_detector parameter");}
   const auto nonnegative_size = [this](const std::string & name, std::size_t value) {
@@ -212,14 +214,22 @@ void ConcreteBlockDetectorNode::handle_discover_blocks(const std::shared_ptr<con
   }
   sensor_msgs::msg::PointCloud2::SharedPtr cloud;
   std::shared_ptr<detector_core::SensorContext> sensor_context;
+  const auto cached_cloud_is_current = [this]() {
+      if (!cached_cloud_world_ || !cached_sensor_context_) {
+        return false;
+      }
+      const rclcpp::Time stamp(cached_cloud_world_->header.stamp, get_clock()->get_clock_type());
+      const double age_s = (now() - stamp).seconds();
+      return age_s >= -0.1 && age_s <= cached_cloud_max_age_s_;
+    };
   {
     std::unique_lock<std::mutex> lock(cached_cloud_mutex_);
     const auto ready = cached_cloud_cv_.wait_for(
       lock, std::chrono::duration<float>(request->timeout_s),
-      [this]() {return cached_cloud_world_ && cached_sensor_context_;});
+      cached_cloud_is_current);
     if (!ready) {
       response->success = false;
-      response->message = "Timed out waiting for a valid world-frame point cloud.";
+      response->message = "Timed out waiting for a current valid world-frame point cloud.";
       return;
     }
     cloud = cached_cloud_world_;

@@ -48,6 +48,7 @@ private:
   std::array<double, 3> scene_bounds_max_m_;
   std::string point_cloud_transport_name_;
   std::string discover_service_;
+  double cached_cloud_max_age_s_;
   bool refine_enabled_;
   detector_core::DetectionParameters detector_parameters_;
 
