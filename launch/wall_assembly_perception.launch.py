@@ -1,7 +1,8 @@
 """Point-cloud perception replacement for the concrete-block wall pipeline.
 
-This launches only the pieces consumed by wall assembly: raw lidar decoding,
-the point-cloud detector, and the persistent world model.  The legacy image
+This launches only the pieces consumed by wall assembly: the point-cloud
+detector and the persistent world model. Cloudini decoding happens in-process
+through the detector's point_cloud_transport subscription. The legacy image
 segmentation, mask-cutout, detection-tracking and registration nodes are not
 started.
 """
@@ -36,12 +37,6 @@ def generate_launch_description():
     points_topic = DeclareLaunchArgument("points_topic", default_value="/seyond/points")
     use_sim_time = DeclareLaunchArgument("use_sim_time", default_value="false")
     start_world_model = DeclareLaunchArgument("start_world_model", default_value="true")
-    start_cloudini_decoder = DeclareLaunchArgument(
-        "start_cloudini_decoder",
-        default_value="true",
-        description="Decode /seyond/points/cloudini to PointCloud2 when required by the sensor.",
-    )
-
     return LaunchDescription(
         [
             detector_params,
@@ -50,22 +45,6 @@ def generate_launch_description():
             points_topic,
             use_sim_time,
             start_world_model,
-            start_cloudini_decoder,
-            Node(
-                package="cloudini_ros",
-                executable="cloudini_topic_converter",
-                name="seyond_points_cloudini_decoder",
-                parameters=[
-                    {
-                        "compressing": False,
-                        "topic_input": "/seyond/points/cloudini",
-                        "topic_output": LaunchConfiguration("points_topic"),
-                        "use_sim_time": LaunchConfiguration("use_sim_time"),
-                    }
-                ],
-                output="screen",
-                condition=IfCondition(LaunchConfiguration("start_cloudini_decoder")),
-            ),
             Node(
                 package="concrete_block_world_model",
                 executable="world_model_node",
@@ -92,6 +71,7 @@ def generate_launch_description():
                     {
                         "use_sim_time": LaunchConfiguration("use_sim_time"),
                         "world_model.enabled": True,
+                        "point_cloud_transport": "cloudini",
                     },
                 ],
                 remappings=[("points", LaunchConfiguration("points_topic"))],

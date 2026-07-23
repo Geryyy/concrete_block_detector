@@ -14,6 +14,7 @@ find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_sensor_msgs REQUIRED)
 find_package(pcl_conversions REQUIRED)
+find_package(point_cloud_transport REQUIRED)
 find_package(concrete_block_world_model_interfaces REQUIRED)
 find_package(PCL REQUIRED COMPONENTS common filters segmentation search)
 
@@ -28,7 +29,7 @@ target_compile_definitions(concrete_block_detector_node PRIVATE ${PCL_DEFINITION
 target_link_libraries(concrete_block_detector_node ${PCL_LIBRARIES})
 ament_target_dependencies(concrete_block_detector_node
   rclcpp sensor_msgs geometry_msgs visualization_msgs tf2 tf2_ros
-  tf2_sensor_msgs pcl_conversions
+  tf2_sensor_msgs pcl_conversions point_cloud_transport
   concrete_block_world_model_interfaces
 )
 

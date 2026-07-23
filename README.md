@@ -20,8 +20,9 @@ dimensions **0.9 × 0.6 × 0.6 m**.
 ros2 launch concrete_block_detector concrete_block_detector.launch.py
 ```
 
-That standalone launch leaves world-model writes disabled; set
-`world_model_enabled:=true` only when `world_model_node` is already running.
+That standalone launch uses the raw `PointCloud2` transport and leaves
+world-model writes disabled; set `world_model_enabled:=true` only when
+`world_model_node` is already running.
 
 For the wall-assembly pipeline, launch the detector with the persistent world
 model it updates:
@@ -41,6 +42,11 @@ The detector refreshes `/world_model_node/get_coarse_blocks` and associates
 nearby free observations with stable IDs before upserting them. This keeps the
 canonical `BlockArray`, planner, and behavior tree supplied without retaining
 the old image-segmentation, mask-cutout, tracking, or registration interfaces.
+
+The wall-assembly launch uses Cloudini's `point_cloud_transport` plugin, so
+the detector subscribes to `/seyond/points/cloudini` and decodes it in-process.
+It does not start a `cloudini_topic_converter` bridge node. This requires the
+`cloudini_ros` runtime package to be installed and sourced.
 
 The node ignores clouds without a valid TF transform to `world` at their input
 timestamp. A valid but empty/no-detection cloud publishes an empty pose array

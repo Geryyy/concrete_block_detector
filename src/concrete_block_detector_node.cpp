@@ -164,6 +164,7 @@ ConcreteBlockDetectorNode::ConcreteBlockDetectorNode(const rclcpp::NodeOptions &
   minimum_long_axis_span_m_(declare_parameter<double>("minimum_long_axis_span_m", 0.70)),
   minimum_secondary_axis_span_m_(declare_parameter<double>("minimum_secondary_axis_span_m", 0.30)),
   transform_timeout_s_(declare_parameter<double>("transform_timeout_s", 0.10)),
+  point_cloud_transport_name_(declare_parameter<std::string>("point_cloud_transport", "raw")),
   world_model_enabled_(declare_parameter<bool>("world_model.enabled", true)),
   world_model_frame_(declare_parameter<std::string>("world_model.frame_id", "world")),
   get_coarse_blocks_service_(declare_parameter<std::string>(
@@ -187,16 +188,14 @@ ConcreteBlockDetectorNode::ConcreteBlockDetectorNode(const rclcpp::NodeOptions &
     minimum_long_axis_span_m_ > kBlockDimensions[0] ||
     minimum_secondary_axis_span_m_ <= 0.0 ||
     minimum_secondary_axis_span_m_ > kBlockDimensions[1] ||
-    transform_timeout_s_ < 0.0 || world_model_frame_.empty() || world_model_id_prefix_.empty() ||
+    transform_timeout_s_ < 0.0 || point_cloud_transport_name_.empty() || world_model_frame_.empty() ||
+    world_model_id_prefix_.empty() ||
     world_model_association_max_distance_m_ <= 0.0 || world_model_cache_refresh_s_ <= 0.0 ||
     world_model_confidence_ < 0.0 || world_model_confidence_ > 1.0)
   {
     throw std::invalid_argument("invalid concrete_block_detector parameter");
   }
 
-  cloud_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
-    "points", rclcpp::SensorDataQoS(),
-    std::bind(&ConcreteBlockDetectorNode::cloud_callback, this, std::placeholders::_1));
   poses_pub_ = create_publisher<geometry_msgs::msg::PoseArray>("poses", 10);
   markers_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>("markers", 10);
   if (world_model_enabled_) {
@@ -205,7 +204,22 @@ ConcreteBlockDetectorNode::ConcreteBlockDetectorNode(const rclcpp::NodeOptions &
     upsert_block_client_ = create_client<
       concrete_block_world_model_interfaces::srv::UpsertBlock>(upsert_block_service_);
   }
-  RCLCPP_INFO(get_logger(), "Concrete block discovery: points -> %s-frame poses", world_frame_.c_str());
+}
+
+void ConcreteBlockDetectorNode::start()
+{
+  if (cloud_sub_) {
+    return;
+  }
+  point_cloud_transport_ = std::make_shared<point_cloud_transport::PointCloudTransport>(shared_from_this());
+  const point_cloud_transport::TransportHints transport_hints(point_cloud_transport_name_);
+  cloud_sub_ = point_cloud_transport_->subscribe(
+    "points", rclcpp::SensorDataQoS().get_rmw_qos_profile(),
+    std::bind(&ConcreteBlockDetectorNode::cloud_callback, this, std::placeholders::_1), {},
+    &transport_hints);
+  RCLCPP_INFO(
+    get_logger(), "Concrete block discovery: points (%s transport) -> %s-frame poses",
+    point_cloud_transport_name_.c_str(), world_frame_.c_str());
 }
 
 void ConcreteBlockDetectorNode::cloud_callback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr cloud)
@@ -494,7 +508,9 @@ void ConcreteBlockDetectorNode::update_world_model(const std::vector<geometry_ms
 int main(int argc, char * argv[])
 {
   rclcpp::init(argc, argv);
-  rclcpp::spin(std::make_shared<concrete_block_detector::ConcreteBlockDetectorNode>());
+  auto node = std::make_shared<concrete_block_detector::ConcreteBlockDetectorNode>();
+  node->start();
+  rclcpp::spin(node);
   rclcpp::shutdown();
   return 0;
 }

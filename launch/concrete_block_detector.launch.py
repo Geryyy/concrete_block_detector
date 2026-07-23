@@ -15,6 +15,7 @@ def generate_launch_description():
         ),
     )
     points_topic = DeclareLaunchArgument("points_topic", default_value="/seyond/points")
+    transport = DeclareLaunchArgument("transport", default_value="raw")
     world_model_enabled = DeclareLaunchArgument(
         "world_model_enabled",
         default_value="false",
@@ -24,6 +25,7 @@ def generate_launch_description():
         [
             params_file,
             points_topic,
+            transport,
             world_model_enabled,
             Node(
                 package="concrete_block_detector",
@@ -31,7 +33,10 @@ def generate_launch_description():
                 name="concrete_block_detector",
                 parameters=[
                     LaunchConfiguration("params_file"),
-                    {"world_model.enabled": LaunchConfiguration("world_model_enabled")},
+                    {
+                        "world_model.enabled": LaunchConfiguration("world_model_enabled"),
+                        "point_cloud_transport": LaunchConfiguration("transport"),
+                    },
                 ],
                 remappings=[("points", LaunchConfiguration("points_topic"))],
                 output="screen",

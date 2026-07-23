@@ -1,6 +1,7 @@
 #pragma once
 
 #include <geometry_msgs/msg/pose_array.hpp>
+#include <point_cloud_transport/point_cloud_transport.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <concrete_block_world_model_interfaces/msg/block.hpp>
@@ -24,6 +25,10 @@ class ConcreteBlockDetectorNode : public rclcpp::Node
 {
 public:
   explicit ConcreteBlockDetectorNode(const rclcpp::NodeOptions & options = rclcpp::NodeOptions{});
+
+  // Must be called after the node is owned by a shared_ptr, because
+  // point_cloud_transport requires that shared ownership for its subscription.
+  void start();
 
 private:
   void cloud_callback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr cloud);
@@ -50,6 +55,7 @@ private:
   double minimum_long_axis_span_m_;
   double minimum_secondary_axis_span_m_;
   double transform_timeout_s_;
+  std::string point_cloud_transport_name_;
   bool world_model_enabled_;
   std::string world_model_frame_;
   std::string get_coarse_blocks_service_;
@@ -59,7 +65,8 @@ private:
   double world_model_cache_refresh_s_;
   double world_model_confidence_;
 
-  rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;
+  std::shared_ptr<point_cloud_transport::PointCloudTransport> point_cloud_transport_;
+  point_cloud_transport::Subscriber cloud_sub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr poses_pub_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr markers_pub_;
   rclcpp::Client<concrete_block_world_model_interfaces::srv::GetCoarseBlocks>::SharedPtr

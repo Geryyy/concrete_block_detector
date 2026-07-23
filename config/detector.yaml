@@ -15,6 +15,9 @@ concrete_block_detector:
     minimum_long_axis_span_m: 0.70
     minimum_secondary_axis_span_m: 0.30
     transform_timeout_s: 0.10
+    # "cloudini" subscribes to points/cloudini and decodes it in-process via
+    # point_cloud_transport. The standalone launch overrides this to "raw".
+    point_cloud_transport: cloudini
     # The detector writes coarse, free blocks to the canonical world model used
     # by the wall planner and behavior tree. No legacy segmentation, cutout or
     # registration services are part of this path.
