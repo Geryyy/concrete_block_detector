@@ -3,6 +3,7 @@
 #include <nlohmann/json.hpp>
 
 #include <cstdlib>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -91,8 +92,9 @@ std::string solver_comparison(
 TEST(Refine, PythonSolverBoundaryParity)
 {
   const std::filesystem::path blockpose(BLOCKPOSE_SOURCE_ROOT);
-  const std::filesystem::path fixture_dir =
-    std::filesystem::temp_directory_path() / "concrete_block_detector_refine_parity";
+  const std::filesystem::path fixture_dir = std::filesystem::temp_directory_path() /
+    ("concrete_block_detector_refine_parity_" + std::to_string(
+      std::chrono::steady_clock::now().time_since_epoch().count()));
   std::filesystem::remove_all(fixture_dir);
   const std::string command =
     "PYTHONPATH='" + (blockpose / "python").string() + "' python3 '" +
