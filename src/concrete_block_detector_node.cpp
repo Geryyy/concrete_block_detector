@@ -59,6 +59,29 @@ detector_core::Points ros_points(const sensor_msgs::msg::PointCloud2 & cloud)
   return points;
 }
 
+detector_core::SensorContext make_sensor_context(
+  const sensor_msgs::msg::PointCloud2 & cloud_world,
+  const geometry_msgs::msg::TransformStamped & world_from_sensor)
+{
+  detector_core::SensorContext context;
+  context.origin = detector_core::Point(
+    world_from_sensor.transform.translation.x,
+    world_from_sensor.transform.translation.y,
+    world_from_sensor.transform.translation.z);
+  const auto raw_returns = ros_points(cloud_world);
+  context.ray_directions.reserve(raw_returns.size());
+  context.ranges.reserve(raw_returns.size());
+  for (const auto & point : raw_returns) {
+    const auto ray = point - context.origin;
+    const double range = ray.norm();
+    if (range > 1e-9 && std::isfinite(range)) {
+      context.ray_directions.push_back(ray / range);
+      context.ranges.push_back(range);
+    }
+  }
+  return context;
+}
+
 }  // namespace
 
 ConcreteBlockDetectorNode::ConcreteBlockDetectorNode(const rclcpp::NodeOptions & options)
@@ -142,6 +165,7 @@ ConcreteBlockDetectorNode::ConcreteBlockDetectorNode(const rclcpp::NodeOptions &
   detector_parameters_.refine_huber_scale = declare_parameter<double>("detector.refine_huber_scale", detector_parameters_.refine_huber_scale);
   detector_parameters_.refine_max_translation = declare_parameter<double>("detector.refine_max_translation", detector_parameters_.refine_max_translation);
   detector_parameters_.refine_max_rotation_deg = declare_parameter<double>("detector.refine_max_rotation_deg", detector_parameters_.refine_max_rotation_deg);
+  cloud_callback_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
   poses_pub_ = create_publisher<geometry_msgs::msg::PoseArray>("poses", 10);
   markers_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>("markers", 10);
   discover_blocks_srv_ = create_service<concrete_block_world_model_interfaces::srv::DiscoverBlocks>(discover_service_, std::bind(&ConcreteBlockDetectorNode::handle_discover_blocks, this, std::placeholders::_1, std::placeholders::_2));
@@ -150,9 +174,12 @@ ConcreteBlockDetectorNode::ConcreteBlockDetectorNode(const rclcpp::NodeOptions &
 void ConcreteBlockDetectorNode::start()
 {
   if (cloud_sub_) {return;}
-  point_cloud_transport_ = std::make_shared<point_cloud_transport::PointCloudTransport>(shared_from_this());
-  const point_cloud_transport::TransportHints hints(point_cloud_transport_name_);
-  cloud_sub_ = point_cloud_transport_->subscribe("points", rclcpp::SensorDataQoS().get_rmw_qos_profile(), std::bind(&ConcreteBlockDetectorNode::cloud_callback, this, std::placeholders::_1), {}, &hints);
+  rclcpp::SubscriptionOptions options;
+  options.callback_group = cloud_callback_group_;
+  cloud_sub_ = point_cloud_transport::create_subscription(
+    shared_from_this(), "points",
+    std::bind(&ConcreteBlockDetectorNode::cloud_callback, this, std::placeholders::_1),
+    point_cloud_transport_name_, rclcpp::SensorDataQoS().get_rmw_qos_profile(), options);
   RCLCPP_INFO(get_logger(), "Concrete block discovery: points (%s transport) -> %s-frame cached snapshots", point_cloud_transport_name_.c_str(), world_frame_.c_str());
 }
 
@@ -160,10 +187,18 @@ void ConcreteBlockDetectorNode::cloud_callback(const sensor_msgs::msg::PointClou
 {
   if (cloud->header.frame_id.empty()) {RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000, "Ignoring point cloud without a frame_id"); return;}
   sensor_msgs::msg::PointCloud2 world;
-  try {const auto transform = tf_buffer_.lookupTransform(world_frame_, cloud->header.frame_id, cloud->header.stamp, tf2::durationFromSec(transform_timeout_s_)); tf2::doTransform(*cloud, world, transform);} catch (const tf2::TransformException & error) {RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000, "Ignoring cloud: no transform %s -> %s at its timestamp: %s", cloud->header.frame_id.c_str(), world_frame_.c_str(), error.what()); return;}
+  detector_core::SensorContext sensor_context;
+  try {
+    const auto transform = tf_buffer_.lookupTransform(
+      world_frame_, cloud->header.frame_id, cloud->header.stamp,
+      tf2::durationFromSec(transform_timeout_s_));
+    tf2::doTransform(*cloud, world, transform);
+    sensor_context = make_sensor_context(world, transform);
+  } catch (const tf2::TransformException & error) {RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000, "Ignoring cloud: no transform %s -> %s at its timestamp: %s", cloud->header.frame_id.c_str(), world_frame_.c_str(), error.what()); return;}
   {
     std::lock_guard<std::mutex> lock(cached_cloud_mutex_);
     cached_cloud_world_ = std::make_shared<sensor_msgs::msg::PointCloud2>(world);
+    cached_sensor_context_ = std::make_shared<detector_core::SensorContext>(std::move(sensor_context));
   }
   cached_cloud_cv_.notify_all();
 }
@@ -176,32 +211,46 @@ void ConcreteBlockDetectorNode::handle_discover_blocks(const std::shared_ptr<con
     return;
   }
   sensor_msgs::msg::PointCloud2::SharedPtr cloud;
+  std::shared_ptr<detector_core::SensorContext> sensor_context;
   {
     std::unique_lock<std::mutex> lock(cached_cloud_mutex_);
     const auto ready = cached_cloud_cv_.wait_for(
       lock, std::chrono::duration<float>(request->timeout_s),
-      [this]() {return static_cast<bool>(cached_cloud_world_);});
+      [this]() {return cached_cloud_world_ && cached_sensor_context_;});
     if (!ready) {
       response->success = false;
       response->message = "Timed out waiting for a valid world-frame point cloud.";
       return;
     }
     cloud = cached_cloud_world_;
+    sensor_context = cached_sensor_context_;
   }
-  try {response->blocks = discover(*cloud); response->success = true; response->message = "Discovered " + std::to_string(response->blocks.blocks.size()) + " block(s).";} catch (const std::exception & error) {response->success = false; response->message = std::string("Discovery failed: ") + error.what(); RCLCPP_ERROR(get_logger(), "%s", response->message.c_str());}
+  try {response->blocks = discover(*cloud, *sensor_context); response->success = true; response->message = "Discovered " + std::to_string(response->blocks.blocks.size()) + " block(s).";} catch (const std::exception & error) {response->success = false; response->message = std::string("Discovery failed: ") + error.what(); RCLCPP_ERROR(get_logger(), "%s", response->message.c_str());}
 }
 
-concrete_block_world_model_interfaces::msg::BlockArray ConcreteBlockDetectorNode::discover(const sensor_msgs::msg::PointCloud2 & cloud_world)
+concrete_block_world_model_interfaces::msg::BlockArray ConcreteBlockDetectorNode::discover(
+  const sensor_msgs::msg::PointCloud2 & cloud_world,
+  const detector_core::SensorContext & sensor_context)
 {
   concrete_block_world_model_interfaces::msg::BlockArray result; result.header = cloud_world.header;
   geometry_msgs::msg::PoseArray poses; poses.header = cloud_world.header;
   visualization_msgs::msg::MarkerArray markers; visualization_msgs::msg::Marker clear; clear.header = cloud_world.header; clear.action = visualization_msgs::msg::Marker::DELETEALL; markers.markers.push_back(clear);
   auto points = ros_points(cloud_world);
   if (scene_bounds_enabled_) {points.erase(std::remove_if(points.begin(), points.end(), [this](const auto & point) {return point.x() < scene_bounds_min_m_[0] || point.x() > scene_bounds_max_m_[0] || point.y() < scene_bounds_min_m_[1] || point.y() > scene_bounds_max_m_[1] || point.z() < scene_bounds_min_m_[2] || point.z() > scene_bounds_max_m_[2];}), points.end());}
-  auto detection = refine_enabled_ ? detector_core::detect(points, detector_parameters_) :
-    detector_core::detect_without_refinement(points, detector_parameters_);
+  auto detection = refine_enabled_ ? detector_core::detect(points, detector_parameters_, &sensor_context) :
+    detector_core::detect_without_refinement(points, detector_parameters_, &sensor_context);
   int marker_id = 0; for (const auto & hypothesis : detection.hypotheses) {const Eigen::Quaterniond orientation(hypothesis.pose.rotation); geometry_msgs::msg::Pose pose; pose.position.x = hypothesis.pose.position.x(); pose.position.y = hypothesis.pose.position.y(); pose.position.z = hypothesis.pose.position.z(); pose.orientation.x = orientation.x(); pose.orientation.y = orientation.y(); pose.orientation.z = orientation.z(); pose.orientation.w = orientation.w(); poses.poses.push_back(pose); markers.markers.push_back(make_marker(poses.header, pose, hypothesis.pose.dims, marker_id++)); concrete_block_world_model_interfaces::msg::Block block; block.pose = pose; block.pose_status = concrete_block_world_model_interfaces::msg::Block::POSE_COARSE; block.task_status = concrete_block_world_model_interfaces::msg::Block::TASK_FREE; block.confidence = static_cast<float>(std::clamp(hypothesis.evidence.score, 0.0, 1.0)); block.last_seen = cloud_world.header.stamp; result.blocks.push_back(std::move(block));}
   poses_pub_->publish(poses); markers_pub_->publish(markers); return result;
 }
 }  // namespace concrete_block_detector
-int main(int argc, char * argv[]) {rclcpp::init(argc, argv); auto node = std::make_shared<concrete_block_detector::ConcreteBlockDetectorNode>(); node->start(); rclcpp::spin(node); rclcpp::shutdown(); return 0;}
+int main(int argc, char * argv[])
+{
+  rclcpp::init(argc, argv);
+  auto node = std::make_shared<concrete_block_detector::ConcreteBlockDetectorNode>();
+  node->start();
+  rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(), 2);
+  executor.add_node(node);
+  executor.spin();
+  rclcpp::shutdown();
+  return 0;
+}

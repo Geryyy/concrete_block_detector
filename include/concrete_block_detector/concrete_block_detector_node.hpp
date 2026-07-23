@@ -38,7 +38,8 @@ private:
     const std::shared_ptr<concrete_block_world_model_interfaces::srv::DiscoverBlocks::Request> request,
     std::shared_ptr<concrete_block_world_model_interfaces::srv::DiscoverBlocks::Response> response);
   concrete_block_world_model_interfaces::msg::BlockArray discover(
-    const sensor_msgs::msg::PointCloud2 & cloud_world);
+    const sensor_msgs::msg::PointCloud2 & cloud_world,
+    const detector_core::SensorContext & sensor_context);
 
   std::string world_frame_;
   double transform_timeout_s_;
@@ -50,8 +51,8 @@ private:
   bool refine_enabled_;
   detector_core::DetectionParameters detector_parameters_;
 
-  std::shared_ptr<point_cloud_transport::PointCloudTransport> point_cloud_transport_;
   point_cloud_transport::Subscriber cloud_sub_;
+  rclcpp::CallbackGroup::SharedPtr cloud_callback_group_;
   rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr poses_pub_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr markers_pub_;
   rclcpp::Service<concrete_block_world_model_interfaces::srv::DiscoverBlocks>::SharedPtr
@@ -59,6 +60,7 @@ private:
   std::mutex cached_cloud_mutex_;
   std::condition_variable cached_cloud_cv_;
   sensor_msgs::msg::PointCloud2::SharedPtr cached_cloud_world_;
+  std::shared_ptr<detector_core::SensorContext> cached_sensor_context_;
   tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;
 };

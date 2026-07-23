@@ -1,0 +1,6 @@
+concrete_block_detector:
+  ros__parameters:
+    # Keep standalone behavior identical to detector.yaml.  Deployments can
+    # provide a calibrated evidence threshold without cropping point data.
+    detector:
+      min_score: 0.0

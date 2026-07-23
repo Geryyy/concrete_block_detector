@@ -14,12 +14,23 @@ def generate_launch_description():
             [FindPackageShare("concrete_block_detector"), "config", "detector.yaml"]
         ),
     )
+    scene_discovery_params = DeclareLaunchArgument(
+        "scene_discovery_params",
+        default_value=PathJoinSubstitution(
+            [
+                FindPackageShare("concrete_block_detector"),
+                "config",
+                "scene_discovery_defaults.yaml",
+            ]
+        ),
+    )
     points_topic = DeclareLaunchArgument("points_topic", default_value="/seyond/points")
     transport = DeclareLaunchArgument("transport", default_value="raw")
     use_sim_time = DeclareLaunchArgument("use_sim_time", default_value="false")
     return LaunchDescription(
         [
             params_file,
+            scene_discovery_params,
             points_topic,
             transport,
             use_sim_time,
@@ -29,6 +40,7 @@ def generate_launch_description():
                 name="concrete_block_detector",
                 parameters=[
                     LaunchConfiguration("params_file"),
+                    LaunchConfiguration("scene_discovery_params"),
                     {
                         "point_cloud_transport": LaunchConfiguration("transport"),
                         "use_sim_time": LaunchConfiguration("use_sim_time"),

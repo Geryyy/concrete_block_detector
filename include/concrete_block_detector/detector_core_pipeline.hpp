@@ -67,7 +67,9 @@ inline std::vector<Points> split_connected_row(const Points & cluster, const Det
   return result.size() == static_cast<std::size_t>(count) ? result : std::vector<Points>{cluster};
 }
 
-inline DetectionResult detect_without_refinement(const Points & input, const DetectionParameters & params = {})
+inline DetectionResult detect_without_refinement(
+  const Points & input, const DetectionParameters & params = {},
+  const SensorContext * sensor_context = nullptr)
 {
   DetectionResult result; result.counts.input_points = input.size();
   if (input.size() < 3U) {return result;}
@@ -115,7 +117,7 @@ inline DetectionResult detect_without_refinement(const Points & input, const Det
       for (const auto & dims : candidate_dims(params)) {for (const auto & pair : candidate_plane_sets(planes, params, result.ground, dims)) {
         Points local_support = region;
         if (pair.second != nullptr) {local_support = pair.first->points; local_support.insert(local_support.end(), pair.second->points.begin(), pair.second->points.end());}
-        const auto pose = canonicalize_pose(synthesize_pose(*pair.first, pair.second, local_support, dims)); const std::size_t support = pair.first->points.size() + (pair.second == nullptr ? 0U : pair.second->points.size()); const auto hypothesis = make_hypothesis(pose, support, result.ground, pair.second == nullptr ? 1U : 2U);
+        const auto pose = canonicalize_pose(synthesize_pose(*pair.first, pair.second, local_support, dims)); const std::size_t support = pair.first->points.size() + (pair.second == nullptr ? 0U : pair.second->points.size()); const auto hypothesis = make_hypothesis(pose, support, result.ground, pair.second == nullptr ? 1U : 2U, sensor_context);
         const double top_height = result.ground.height(pair.first->centroid); const bool supported = !(top_height <= dims[2] * 1.1 && std::abs(hypothesis.support_height_m) > .135);
         if (top_height >= dims[2] * .70 && supported) {raw.push_back(hypothesis);}
       }}
@@ -124,13 +126,15 @@ inline DetectionResult detect_without_refinement(const Points & input, const Det
   result.counts.raw_hypotheses = raw.size(); std::vector<CuboidHypothesis> thresholded; for (const auto & hypothesis : raw) {if (hypothesis.evidence.score >= params.min_score) {thresholded.push_back(hypothesis);}}
   result.hypotheses = select_conflict_alternatives(std::move(thresholded), params.conflict_alternatives);
   result.counts.refinement_candidates = result.hypotheses.size();
-  result.hypotheses.erase(std::remove_if(result.hypotheses.begin(), result.hypotheses.end(), [&result](const auto & hypothesis) {return result.ground.height(hypothesis.pose.position) < 0.0 || result.ground.height(hypothesis.pose.position) > 3.0;}), result.hypotheses.end());
+  result.hypotheses.erase(std::remove_if(result.hypotheses.begin(), result.hypotheses.end(), [&result, &params](const auto & hypothesis) {return result.ground.height(hypothesis.pose.position) < 0.0 || result.ground.height(hypothesis.pose.position) > params.cluster_max_center_z;}), result.hypotheses.end());
   std::sort(result.hypotheses.begin(), result.hypotheses.end(), [](const auto & a, const auto & b) {return a.pose.position.z() > b.pose.position.z();}); for (const auto & hypothesis : result.hypotheses) {result.poses.push_back(hypothesis.pose);} result.counts.selected_hypotheses = result.hypotheses.size(); return result;
 }
 
-inline DetectionResult detect(const Points & input, const DetectionParameters & params = {})
+inline DetectionResult detect(
+  const Points & input, const DetectionParameters & params = {},
+  const SensorContext * sensor_context = nullptr)
 {
-  DetectionResult result = detect_without_refinement(input, params);
+  DetectionResult result = detect_without_refinement(input, params, sensor_context);
   if (result.hypotheses.empty()) {return result;}
   std::vector<CuboidPose> initial;
   initial.reserve(result.hypotheses.size());
@@ -156,7 +160,7 @@ inline DetectionResult detect(const Points & input, const DetectionParameters & 
     const auto & prior = result.hypotheses[index];
     auto hypothesis = make_hypothesis(
       pose, prior.evidence.support_points, result.ground,
-      prior.evidence.observed_geometry_faces);
+      prior.evidence.observed_geometry_faces, sensor_context);
     if (result.ground.height(pose.position) >= 0.0 &&
       result.ground.height(pose.position) <= params.cluster_max_center_z)
     {
