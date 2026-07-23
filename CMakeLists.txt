@@ -64,6 +64,9 @@ if(BUILD_TESTING)
   )
   target_include_directories(test_detector_core_refine PRIVATE include)
   target_link_libraries(test_detector_core_refine Eigen3::Eigen)
+  target_compile_definitions(test_detector_core_refine PRIVATE
+    BLOCKPOSE_SOURCE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/../blockpose"
+  )
 
   ament_add_gtest(test_detector_core_evidence
     test/test_detector_core_evidence.cpp
