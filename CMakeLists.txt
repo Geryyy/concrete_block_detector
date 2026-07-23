@@ -37,7 +37,18 @@ add_executable(concrete_block_detector_snapshot_runner
 target_include_directories(concrete_block_detector_snapshot_runner PRIVATE include)
 target_link_libraries(concrete_block_detector_snapshot_runner Eigen3::Eigen yaml-cpp)
 
+# This consumes the Python-selected initialization fixture.  It is a
+# deliberately separate diagnostic executable: the normal detector tests keep
+# their full end-to-end contract while this identifies a mismatch before the
+# SDF solver is involved.
+add_executable(concrete_block_detector_proposal_parity_runner
+  src/concrete_block_detector_proposal_parity_runner.cpp
+)
+target_include_directories(concrete_block_detector_proposal_parity_runner PRIVATE include)
+target_link_libraries(concrete_block_detector_proposal_parity_runner Eigen3::Eigen)
+
 install(TARGETS concrete_block_detector_node concrete_block_detector_snapshot_runner
+  concrete_block_detector_proposal_parity_runner
   DESTINATION lib/${PROJECT_NAME}
 )
 install(DIRECTORY launch config DESTINATION share/${PROJECT_NAME})
