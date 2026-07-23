@@ -17,12 +17,17 @@ namespace concrete_block_detector::detector_core
 struct DetectionParameters
 {
   double voxel_size{0.04}, dbscan_eps{0.07};
+  double ground_thickness{0.15}, ground_ransac_distance{0.05}, ground_normal_min_z{0.7};
+  std::size_t ground_ransac_iterations{500};
+  double local_ground_cell_size{0.5}, local_ground_clearance{0.05};
   std::size_t dbscan_min_points{5}, cluster_min_size{30}, cluster_max_size{50000};
   double cluster_min_extent_xy{0.3}, cluster_max_extent_xy{1.5}, region_max_extent_xy{3.0};
   double cluster_min_extent_z{0.3}, cluster_max_extent_z{3.5}, cluster_max_center_z{3.0};
   double ransac_distance{0.02}; std::size_t ransac_iterations{1000}, ransac_search_max_points{2048}; std::uint64_t ransac_seed{0};
   std::size_t max_planes{5}, min_inliers{40}; double top_plane_angle_deg{30.0}, side_plane_angle_deg{20.0}, max_plane_center_dist{0.6};
   std::array<double, 3> block_dims{{0.9, 0.6, 0.6}}; std::vector<std::array<double, 3>> candidate_dims;
+  double refine_band{0.10}; std::size_t refine_iterations{2}, refine_min_points{20};
+  double refine_huber_scale{0.05}, refine_max_translation{0.15}, refine_max_rotation_deg{20.0};
   double min_score{0.0}; std::size_t conflict_alternatives{1}, proposal_max_components{8}, proposal_max_points{30000};
   bool multiscale_proposals{false};
 };
@@ -32,17 +37,67 @@ struct HypothesisEvidence {std::size_t support_points{0}; double top_height_erro
 struct CuboidHypothesis {Pose pose; HypothesisEvidence evidence; std::optional<double> proposal_scale_m; double support_height_m{0.0};};
 struct PlaneFitCounts {std::size_t calls{0}, search_points{0}, full_points_scored{0}, trials_evaluated{0}, valid_trials{0};};
 
+// Direct port of blockpose._canonicalize_pose.  The swapped horizontal
+// dimensions describe the same physical cuboid; rotate its local frame into
+// the package's canonical 0.9 x 0.6 x 0.6 convention before refinement/NMS.
+inline Pose canonicalize_pose(Pose pose)
+{
+  constexpr double tolerance = 1.0e-9;
+  if (std::abs(pose.dims[0] - 0.6) <= tolerance &&
+    std::abs(pose.dims[1] - 0.9) <= tolerance &&
+    std::abs(pose.dims[2] - 0.6) <= tolerance)
+  {
+    Eigen::Matrix3d local_swap;
+    local_swap << 0.0, -1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0;
+    pose.rotation *= local_swap;
+    pose.dims = {{0.9, 0.6, 0.6}};
+  }
+  return pose;
+}
+
 inline std::array<double, 3> extent(const Points & points)
 { Point lower = points.empty() ? Point::Zero() : points.front(), upper = lower; for (const auto & p : points) {lower = lower.cwiseMin(p); upper = upper.cwiseMax(p);} const Point e = upper - lower; return {{e.x(), e.y(), e.z()}}; }
 inline Point centroid(const Points & points)
 { Point result = Point::Zero(); for (const auto & p : points) {result += p;} return points.empty() ? result : result / static_cast<double>(points.size()); }
 inline double median(std::vector<double> values) {return percentile_linear(std::move(values), 50.0);}
 
+inline std::tuple<long long, long long, long long> spatial_cell(const Point & point, double cell_size)
+{
+  return std::make_tuple(
+    static_cast<long long>(std::floor(point.x() / cell_size)),
+    static_cast<long long>(std::floor(point.y() / cell_size)),
+    static_cast<long long>(std::floor(point.z() / cell_size)));
+}
+
+inline std::map<std::tuple<long long, long long, long long>, std::vector<std::size_t>> make_spatial_grid(
+  const Points & points, double cell_size)
+{
+  std::map<std::tuple<long long, long long, long long>, std::vector<std::size_t>> grid;
+  for (std::size_t index = 0; index < points.size(); ++index) {grid[spatial_cell(points[index], cell_size)].push_back(index);}
+  return grid;
+}
+
+inline std::vector<std::size_t> grid_neighbors(const Points & points,
+  const std::map<std::tuple<long long, long long, long long>, std::vector<std::size_t>> & grid,
+  std::size_t index, double cell_size, double radius_squared)
+{
+  const auto [x, y, z] = spatial_cell(points[index], cell_size);
+  std::vector<std::size_t> result;
+  for (long long dx = -1; dx <= 1; ++dx) for (long long dy = -1; dy <= 1; ++dy) for (long long dz = -1; dz <= 1; ++dz) {
+    const auto bucket = grid.find(std::make_tuple(x + dx, y + dy, z + dz));
+    if (bucket == grid.end()) {continue;}
+    for (const auto other : bucket->second) {if ((points[index] - points[other]).squaredNorm() <= radius_squared) {result.push_back(other);}}
+  }
+  std::sort(result.begin(), result.end());
+  return result;
+}
+
 inline std::vector<Points> dbscan_proposals(
   const Points & input, const DetectionParameters & params, const GroundPlane * ground = nullptr)
 {
   const Points points = canonical_order(input); const std::size_t count = points.size(); std::vector<int> labels(count, -2); const double radius_sq = params.dbscan_eps * params.dbscan_eps;
-  const auto neighbors = [&](std::size_t index) {std::vector<std::size_t> result; for (std::size_t other = 0; other < count; ++other) {if ((points[index] - points[other]).squaredNorm() <= radius_sq) {result.push_back(other);}} return result;};
+  const auto grid = make_spatial_grid(points, params.dbscan_eps);
+  const auto neighbors = [&](std::size_t index) {return grid_neighbors(points, grid, index, params.dbscan_eps, radius_sq);};
   int label = 0;
   for (std::size_t index = 0; index < count; ++index) {if (labels[index] != -2) {continue;} auto seeds = neighbors(index); if (seeds.size() < params.dbscan_min_points) {labels[index] = -1; continue;} labels[index] = label;
     for (std::size_t cursor = 0; cursor < seeds.size(); ++cursor) {const auto candidate = seeds[cursor]; if (labels[candidate] == -1) {labels[candidate] = label;} if (labels[candidate] != -2) {continue;} labels[candidate] = label; const auto adjacent = neighbors(candidate); if (adjacent.size() >= params.dbscan_min_points) {for (const auto next : adjacent) {if (std::find(seeds.begin(), seeds.end(), next) == seeds.end()) {seeds.push_back(next);}}}} ++label;}
@@ -53,9 +108,9 @@ inline std::vector<Points> dbscan_proposals(
 
 inline std::vector<PlanePatch> split_plane_patch(const PlanePatch & patch, const DetectionParameters & params)
 {
-  if (patch.points.size() < 2U * params.min_inliers) {return {patch};} Point normal = patch.normal.normalized(), seed = std::abs(normal.x()) > .9 ? Point::UnitY() : Point::UnitX(); Point first = (seed - seed.dot(normal) * normal).normalized(), second = normal.cross(first); const double radius_sq = std::pow(std::max(params.voxel_size * 2.5, params.dbscan_eps * 1.25), 2); const auto count = patch.points.size(); std::vector<std::size_t> parent(count); for (std::size_t i = 0; i < count; ++i) {parent[i] = i;}
+  if (patch.points.size() < 2U * params.min_inliers) {return {patch};} Point normal = patch.normal.normalized(), seed = std::abs(normal.x()) > .9 ? Point::UnitY() : Point::UnitX(); Point first = (seed - seed.dot(normal) * normal).normalized(), second = normal.cross(first); const double radius = std::max(params.voxel_size * 2.5, params.dbscan_eps * 1.25), radius_sq = radius * radius; const auto count = patch.points.size(); std::vector<std::size_t> parent(count); for (std::size_t i = 0; i < count; ++i) {parent[i] = i;}
   const auto root = [&parent](std::size_t value) {std::size_t r = value; while (parent[r] != r) {r = parent[r];} while (parent[value] != value) {const auto next = parent[value]; parent[value] = r; value = next;} return r;};
-  for (std::size_t i = 0; i < count; ++i) {for (std::size_t j = i + 1; j < count; ++j) {const Point delta = patch.points[i] - patch.points[j]; if (std::pow(delta.dot(first), 2) + std::pow(delta.dot(second), 2) > radius_sq) {continue;} const auto a = root(i), b = root(j); if (a != b) {parent[std::max(a, b)] = std::min(a, b);}}}
+  Points projected; projected.reserve(count); for (const auto & point : patch.points) {projected.emplace_back(point.dot(first), point.dot(second), 0.0);} const auto grid = make_spatial_grid(projected, radius); for (std::size_t i = 0; i < count; ++i) {for (const auto j : grid_neighbors(projected, grid, i, radius, radius_sq)) {if (j <= i) {continue;} const auto a = root(i), b = root(j); if (a != b) {parent[std::max(a, b)] = std::min(a, b);}}}
   std::map<std::size_t, Points> groups; for (std::size_t i = 0; i < count; ++i) {groups[root(i)].push_back(patch.points[i]);} std::size_t valid = 0; for (const auto & [_, group] : groups) {if (group.size() >= params.min_inliers) {++valid;}} if (valid < 2) {return {patch};} std::vector<PlanePatch> output{patch};
   for (const auto & [_, group] : groups) {if (group.size() < params.min_inliers) {continue;} const Point center = centroid(group); std::vector<double> residuals; for (const auto & point : group) {residuals.push_back((point - center).dot(normal));} const double middle = median(residuals); for (auto & value : residuals) {value = std::abs(value - middle);} output.push_back({normal, center, group, median(std::move(residuals))});} return output;
 }
@@ -78,7 +133,7 @@ inline std::vector<std::pair<const PlanePatch *, const PlanePatch *>> candidate_
 
 inline Pose synthesize_pose(const PlanePatch & top, const PlanePatch * side, const Points & cluster, const std::array<double, 3> & dims)
 {
-  Point z = top.normal.normalized(); if (z.z() < 0.0) {z = -z;} Point x; if (side != nullptr) {x = side->normal - side->normal.dot(z) * z; if (x.norm() < 1e-8) {x = Point::UnitX() - Point::UnitX().dot(z) * z;} x.normalize(); if ((centroid(cluster) - side->centroid).dot(x) < 0.0) {x = -x;}} else {Eigen::Matrix3d covariance = Eigen::Matrix3d::Zero(); const Point center = centroid(cluster); for (const auto & point : cluster) {Point d = point - center; d -= d.dot(z) * z; covariance.noalias() += d * d.transpose();} Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> solve(covariance); if (solve.info() == Eigen::Success) {x = solve.eigenvectors().col(2);} else {x = Point::UnitX();} x -= x.dot(z) * z; if (x.norm() < 1e-8) {x = Point::UnitX() - Point::UnitX().dot(z) * z;} x.normalize();} Point y = z.cross(x).normalized(); Pose pose; pose.rotation.col(0) = x; pose.rotation.col(1) = y; pose.rotation.col(2) = z; pose.position = top.centroid - z * (dims[2] / 2.0); pose.dims = dims; pose.confidence = side == nullptr ? .5 : 1.; if (side != nullptr) {pose.position += x * (dims[0] / 2.0 - (pose.position - side->centroid).dot(x));} return pose;
+  Point z = top.normal.normalized(); if (z.z() < 0.0) {z = -z;} Point x; if (side != nullptr) {x = side->normal - side->normal.dot(z) * z; if (x.norm() < 1e-8) {x = Point::UnitX() - Point::UnitX().dot(z) * z;} x.normalize(); if ((centroid(cluster) - side->centroid).dot(x) < 0.0) {x = -x;}} else {Eigen::Matrix3d covariance = Eigen::Matrix3d::Zero(); const Point center = centroid(cluster); for (const auto & point : cluster) {Point d = point - center; d -= d.dot(z) * z; covariance.noalias() += d * d.transpose();} Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> solve(covariance); if (solve.info() == Eigen::Success) {x = solve.eigenvectors().col(2);} else {x = Point::UnitX();} x -= x.dot(z) * z; if (x.norm() < 1e-8) {x = Point::UnitX() - Point::UnitX().dot(z) * z;} x.normalize();} Point y = z.cross(x).normalized(); Pose pose; pose.rotation.col(0) = x; pose.rotation.col(1) = y; pose.rotation.col(2) = z; pose.position = top.centroid - z * (dims[2] / 2.0); pose.dims = dims; pose.confidence = side == nullptr ? .5 : 1.; if (side != nullptr) {pose.position += x * (dims[0] / 2.0 - (pose.position - side->centroid).dot(x));} return canonicalize_pose(pose);
 }
 
 template<typename GroundModel>
@@ -91,4 +146,54 @@ inline bool boxes_overlap(const Pose & first, const Pose & second, double shrink
 }
 inline std::vector<CuboidHypothesis> select_hypotheses(std::vector<CuboidHypothesis> hypotheses, double shrink = .08)
 { std::sort(hypotheses.begin(), hypotheses.end(), [](const auto & a, const auto & b) {return a.evidence.score == b.evidence.score ? canonical_less(a.pose.position, b.pose.position) : a.evidence.score > b.evidence.score;}); std::vector<CuboidHypothesis> selected; for (const auto & candidate : hypotheses) {bool conflict = false; for (const auto & prior : selected) {if (boxes_overlap(candidate.pose, prior.pose, shrink)) {conflict = true; break;}} if (!conflict) {selected.push_back(candidate);}} return selected; }
+
+inline double pose_rotation_error_deg(const Pose & first, const Pose & second)
+{
+  const Eigen::Matrix3d delta = first.rotation.transpose() * second.rotation;
+  return std::acos(std::clamp((delta.trace() - 1.0) / 2.0, -1.0, 1.0)) * 180.0 / M_PI;
+}
+
+// Direct port of blockpose._select_conflict_alternatives.  Keeping more than
+// one diverse seed per overlap group lets refinement choose between competing
+// closed-form plane fits; the final greedy NMS still returns one pose/group.
+inline std::vector<CuboidHypothesis> select_conflict_alternatives(
+  std::vector<CuboidHypothesis> hypotheses, std::size_t limit, double shrink = .08)
+{
+  if (limit < 1U) {throw std::invalid_argument("conflict_alternatives must be at least one");}
+  std::sort(hypotheses.begin(), hypotheses.end(), [](const auto & a, const auto & b) {
+    return a.evidence.score == b.evidence.score ? canonical_less(a.pose.position, b.pose.position) :
+           a.evidence.score > b.evidence.score;
+  });
+  std::vector<std::vector<CuboidHypothesis>> groups;
+  for (const auto & candidate : hypotheses) {
+    std::vector<std::size_t> overlapping;
+    for (std::size_t index = 0; index < groups.size(); ++index) {
+      if (std::any_of(groups[index].begin(), groups[index].end(), [&candidate, shrink](const auto & member) {
+          return boxes_overlap(candidate.pose, member.pose, shrink);
+        })) {overlapping.push_back(index);}
+    }
+    if (overlapping.empty()) {groups.push_back({candidate}); continue;}
+    const std::size_t destination = overlapping.front();
+    groups[destination].push_back(candidate);
+    for (auto iterator = overlapping.rbegin(); iterator != overlapping.rend(); ++iterator) {
+      if (*iterator == destination) {continue;}
+      groups[destination].insert(groups[destination].end(), groups[*iterator].begin(), groups[*iterator].end());
+      groups.erase(groups.begin() + static_cast<std::ptrdiff_t>(*iterator));
+    }
+  }
+  std::vector<CuboidHypothesis> selected;
+  for (const auto & group : groups) {
+    std::vector<CuboidHypothesis> diverse;
+    for (const auto & candidate : group) {
+      const bool duplicate = std::any_of(diverse.begin(), diverse.end(), [&candidate](const auto & prior) {
+          return (candidate.pose.position - prior.pose.position).norm() < .02 &&
+                 pose_rotation_error_deg(candidate.pose, prior.pose) < 2.0;
+        });
+      if (!duplicate) {diverse.push_back(candidate);}
+      if (diverse.size() == limit) {break;}
+    }
+    selected.insert(selected.end(), diverse.begin(), diverse.end());
+  }
+  return selected;
+}
 }  // namespace concrete_block_detector::detector_core

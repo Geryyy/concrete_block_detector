@@ -15,7 +15,7 @@ struct PipelineCounts
   std::size_t proposal_components{0}, plane_regions{0}, plane_fit_calls{0};
   std::size_t plane_search_points{0}, plane_full_points_scored{0};
   std::size_t plane_trials_evaluated{0}, plane_valid_trials{0};
-  std::size_t raw_hypotheses{0}, selected_hypotheses{0};
+  std::size_t raw_hypotheses{0}, refinement_candidates{0}, selected_hypotheses{0};
 };
 struct DetectionResult {std::vector<Pose> poses; std::vector<CuboidHypothesis> hypotheses; PipelineCounts counts; LocalGroundModel ground; Points above_support_points;};
 
@@ -24,21 +24,29 @@ struct DetectionResult {std::vector<Pose> poses; std::vector<CuboidHypothesis> h
 inline Points voxel_downsample(const Points & input, double voxel_size)
 {
   if (!std::isfinite(voxel_size) || voxel_size <= 0.0) {throw std::invalid_argument("voxel_size must be positive");}
-  struct Accumulator {Point sum{Point::Zero()}; std::size_t count{0};};
+  struct Accumulator {Eigen::Vector3f sum{Eigen::Vector3f::Zero()}; float count{0.0F};};
   std::map<std::tuple<long long, long long, long long>, Accumulator> voxels;
-  for (const auto & input_point : input) {
+  // Open3D receives both the points and voxel size as float32 tensors.  Cast
+  // the size as well: dividing float32 positions by the original double
+  // crosses cell boundaries differently (and changes downstream RANSAC).
+  const double hash_voxel_size = static_cast<double>(static_cast<float>(voxel_size));
+  for (const auto & input_point : canonical_order(input)) {
     // blockpose _voxel_downsample explicitly converts float64 input to the
     // Open3D tensor float32 representation before voxel hashing/averaging.
     // Hashing the original doubles changes cells at boundaries.
-    const Point point(
-      static_cast<double>(static_cast<float>(input_point.x())),
-      static_cast<double>(static_cast<float>(input_point.y())),
-      static_cast<double>(static_cast<float>(input_point.z())));
+    const Eigen::Vector3f point(
+      static_cast<float>(input_point.x()), static_cast<float>(input_point.y()),
+      static_cast<float>(input_point.z()));
     if (!point.allFinite()) {throw std::invalid_argument("points must be finite");}
-    const auto index = std::make_tuple(static_cast<long long>(std::floor(point.x() / voxel_size)), static_cast<long long>(std::floor(point.y() / voxel_size)), static_cast<long long>(std::floor(point.z() / voxel_size)));
-    auto & value = voxels[index]; value.sum += point; ++value.count;
+    const auto index = std::make_tuple(static_cast<long long>(std::floor(point.x() / hash_voxel_size)), static_cast<long long>(std::floor(point.y() / hash_voxel_size)), static_cast<long long>(std::floor(point.z() / hash_voxel_size)));
+    auto & value = voxels[index]; value.sum += point; value.count += 1.0F;
   }
-  Points output; output.reserve(voxels.size()); for (const auto & [_, value] : voxels) {output.push_back(value.sum / static_cast<double>(value.count));}
+  Points output;
+  output.reserve(voxels.size());
+  for (const auto & [_, value] : voxels) {
+    const Eigen::Vector3f average = value.sum / value.count;
+    output.emplace_back(average.cast<double>());
+  }
   return canonical_order(std::move(output));
 }
 
@@ -65,11 +73,29 @@ inline DetectionResult detect_without_refinement(const Points & input, const Det
   if (input.size() < 3U) {return result;}
   const Points downsampled = voxel_downsample(input, params.voxel_size); result.counts.downsampled_points = downsampled.size();
   if (downsampled.size() < 3U) {return result;}
-  GroundParameters ground_params; ground_params.thickness = .15; ground_params.ransac_distance = .05; ground_params.ransac_iterations = 500; ground_params.ransac_seed = params.ransac_seed; ground_params.local_cell_size = .5; ground_params.local_clearance = .05;
+  GroundParameters ground_params;
+  ground_params.thickness = params.ground_thickness;
+  ground_params.ransac_distance = params.ground_ransac_distance;
+  ground_params.ransac_iterations = params.ground_ransac_iterations;
+  ground_params.ransac_seed = params.ransac_seed;
+  ground_params.normal_min_z = params.ground_normal_min_z;
+  ground_params.local_cell_size = params.local_ground_cell_size;
+  ground_params.local_clearance = params.local_ground_clearance;
   const Points coarse_ground = voxel_downsample(downsampled, .1);
   const GroundRemovalResult removed = remove_ground(downsampled, ground_params, &coarse_ground); result.ground = removed.ground; result.above_support_points = removed.above_ground; result.counts.above_support_points = removed.above_ground.size();
   if (removed.above_ground.empty()) {return result;}
-  const auto proposals = dbscan_proposals(removed.above_ground, params, &result.ground); result.counts.proposal_components = proposals.size();
+  // blockpose keeps the low-clearance cloud for cuboid refinement, but does
+  // not let ground-adjacent returns seed DBSCAN components.  Mixing the two
+  // caused cluttered blocks to choose a different side plane.
+  Points proposal_seed;
+  proposal_seed.reserve(removed.above_ground.size());
+  for (const auto & point : removed.above_ground) {
+    if (result.ground.height(point) >= params.ground_thickness) {
+      proposal_seed.push_back(point);
+    }
+  }
+  const auto proposals = dbscan_proposals(proposal_seed, params, &result.ground);
+  result.counts.proposal_components = proposals.size();
   std::vector<CuboidHypothesis> raw;
   for (const auto & proposal : proposals) {
     const auto regions = split_connected_row(proposal, params);
@@ -89,14 +115,15 @@ inline DetectionResult detect_without_refinement(const Points & input, const Det
       for (const auto & dims : candidate_dims(params)) {for (const auto & pair : candidate_plane_sets(planes, params, result.ground, dims)) {
         Points local_support = region;
         if (pair.second != nullptr) {local_support = pair.first->points; local_support.insert(local_support.end(), pair.second->points.begin(), pair.second->points.end());}
-        const auto pose = synthesize_pose(*pair.first, pair.second, local_support, dims); const std::size_t support = pair.first->points.size() + (pair.second == nullptr ? 0U : pair.second->points.size()); const auto hypothesis = make_hypothesis(pose, support, result.ground, pair.second == nullptr ? 1U : 2U);
+        const auto pose = canonicalize_pose(synthesize_pose(*pair.first, pair.second, local_support, dims)); const std::size_t support = pair.first->points.size() + (pair.second == nullptr ? 0U : pair.second->points.size()); const auto hypothesis = make_hypothesis(pose, support, result.ground, pair.second == nullptr ? 1U : 2U);
         const double top_height = result.ground.height(pair.first->centroid); const bool supported = !(top_height <= dims[2] * 1.1 && std::abs(hypothesis.support_height_m) > .135);
         if (top_height >= dims[2] * .70 && supported) {raw.push_back(hypothesis);}
       }}
     }
   }
   result.counts.raw_hypotheses = raw.size(); std::vector<CuboidHypothesis> thresholded; for (const auto & hypothesis : raw) {if (hypothesis.evidence.score >= params.min_score) {thresholded.push_back(hypothesis);}}
-  result.hypotheses = select_hypotheses(std::move(thresholded));
+  result.hypotheses = select_conflict_alternatives(std::move(thresholded), params.conflict_alternatives);
+  result.counts.refinement_candidates = result.hypotheses.size();
   result.hypotheses.erase(std::remove_if(result.hypotheses.begin(), result.hypotheses.end(), [&result](const auto & hypothesis) {return result.ground.height(hypothesis.pose.position) < 0.0 || result.ground.height(hypothesis.pose.position) > 3.0;}), result.hypotheses.end());
   std::sort(result.hypotheses.begin(), result.hypotheses.end(), [](const auto & a, const auto & b) {return a.pose.position.z() > b.pose.position.z();}); for (const auto & hypothesis : result.hypotheses) {result.poses.push_back(hypothesis.pose);} result.counts.selected_hypotheses = result.hypotheses.size(); return result;
 }
@@ -111,7 +138,14 @@ inline DetectionResult detect(const Points & input, const DetectionParameters & 
     initial.push_back({hypothesis.pose.position, hypothesis.pose.rotation, hypothesis.pose.dims,
       hypothesis.pose.confidence, "plane_fit"});
   }
-  const auto refined = refine_poses(std::move(initial), result.above_support_points);
+  RefineParameters refine_params;
+  refine_params.huber_scale = params.refine_huber_scale;
+  refine_params.max_translation = params.refine_max_translation;
+  refine_params.max_rotation_deg = params.refine_max_rotation_deg;
+  refine_params.min_points = params.refine_min_points;
+  const auto refined = refine_poses(
+    std::move(initial), result.above_support_points, params.refine_band,
+    params.refine_iterations, refine_params);
   std::vector<CuboidHypothesis> rescored;
   rescored.reserve(result.hypotheses.size());
   for (std::size_t index = 0; index < result.hypotheses.size(); ++index) {

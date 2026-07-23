@@ -1,5 +1,7 @@
 #pragma once
 
+#include "concrete_block_detector/detector_core_proposals.hpp"
+
 #include <geometry_msgs/msg/pose_array.hpp>
 #include <point_cloud_transport/point_cloud_transport.hpp>
 #include <rclcpp/rclcpp.hpp>
@@ -11,6 +13,7 @@
 #include <visualization_msgs/msg/marker_array.hpp>
 
 #include <array>
+#include <condition_variable>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -45,6 +48,7 @@ private:
   std::string point_cloud_transport_name_;
   std::string discover_service_;
   bool refine_enabled_;
+  detector_core::DetectionParameters detector_parameters_;
 
   std::shared_ptr<point_cloud_transport::PointCloudTransport> point_cloud_transport_;
   point_cloud_transport::Subscriber cloud_sub_;
@@ -53,9 +57,11 @@ private:
   rclcpp::Service<concrete_block_world_model_interfaces::srv::DiscoverBlocks>::SharedPtr
     discover_blocks_srv_;
   std::mutex cached_cloud_mutex_;
+  std::condition_variable cached_cloud_cv_;
   sensor_msgs::msg::PointCloud2::SharedPtr cached_cloud_world_;
   tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;
 };
 
 }  // namespace concrete_block_detector
+#include "concrete_block_detector/detector_core_proposals.hpp"

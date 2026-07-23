@@ -1,10 +1,10 @@
 #include "concrete_block_detector/detector_core_pipeline.hpp"
-#include "concrete_block_detector/detector_core_refine.hpp"
 
 #include <gtest/gtest.h>
 
 #include <cstdlib>
 #include <algorithm>
+#include <array>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -75,28 +75,32 @@ std::vector<std::size_t> optimal_assignment(const std::vector<Pose> & actual, co
 void compare_case(const std::filesystem::path & fixture_dir, const std::string & id)
 {
   const Expected expected = load_expected(fixture_dir / (id + ".expected"));
-  auto actual = detect_without_refinement(load_points(fixture_dir / (id + ".xyz")));
-  const auto initial_poses = actual.poses;
-  std::vector<CuboidPose> initial;
-  for (const auto & hypothesis : actual.hypotheses) {
-    initial.push_back({hypothesis.pose.position, hypothesis.pose.rotation, hypothesis.pose.dims, hypothesis.pose.confidence, "plane_fit"});
-  }
-  const auto refined = refine_poses(std::move(initial), actual.above_support_points);
-  for (std::size_t index = 0; index < actual.hypotheses.size(); ++index) {
-    actual.poses[index].position = refined[index].position;
-    actual.poses[index].rotation = refined[index].rotation;
-  }
+  const Points points = load_points(fixture_dir / (id + ".xyz"));
+  const auto actual = detect(points);
   EXPECT_EQ(actual.poses.size(), expected.poses) << id;
   ASSERT_EQ(actual.poses.size(), expected.values.size()) << id;
   const auto assignment = optimal_assignment(actual.poses, expected.values);
   for (std::size_t index = 0; index < actual.poses.size(); ++index) {
     const std::size_t expected_index = assignment[index];
-    EXPECT_LE((actual.poses[index].position - expected.values[expected_index].position).norm(), 0.05) << id << " initial=" << initial_poses[index].position.transpose() << " actual=" << actual.poses[index].position.transpose() << " expected=" << expected.values[expected_index].position.transpose() << " faces=" << actual.hypotheses[index].evidence.observed_geometry_faces << " support=" << actual.hypotheses[index].evidence.support_points;
+    EXPECT_LE((actual.poses[index].position - expected.values[expected_index].position).norm(), 0.05) << id;
+    EXPECT_EQ(actual.poses[index].dims, expected.values[expected_index].dims) << id;
+    const std::array<Eigen::Matrix3d, 4> symmetries{{
+        Eigen::Matrix3d::Identity(),
+        Eigen::Vector3d(-1.0, -1.0, 1.0).asDiagonal(),
+        Eigen::Vector3d(-1.0, 1.0, -1.0).asDiagonal(),
+        Eigen::Vector3d(1.0, -1.0, -1.0).asDiagonal(),
+      }};
+    double rotation_error = std::numeric_limits<double>::infinity();
+    for (const Eigen::Matrix3d & symmetry : symmetries) {
+      const Eigen::Matrix3d delta = (actual.poses[index].rotation * symmetry).transpose() * expected.values[expected_index].rotation;
+      rotation_error = std::min(rotation_error, std::acos(std::clamp((delta.trace() - 1.0) / 2.0, -1.0, 1.0)) * 180.0 / M_PI);
+    }
+    EXPECT_LE(rotation_error, 5.0) << id;
     EXPECT_NEAR(actual.hypotheses[index].evidence.score, expected.scores[expected_index], 0.02) << id;
   }
-  const auto expected_selected = expected.counts.find("selected_hypotheses");
-  ASSERT_NE(expected_selected, expected.counts.end()) << id;
-  EXPECT_EQ(actual.counts.selected_hypotheses, expected_selected->second) << id;
+  const std::map<std::string, std::size_t> actual_counts{{"input_points", actual.counts.input_points}, {"downsampled_points", actual.counts.downsampled_points}, {"above_support_points", actual.counts.above_support_points}, {"proposal_components", actual.counts.proposal_components}, {"plane_regions", actual.counts.plane_regions}, {"plane_fit_calls", actual.counts.plane_fit_calls}, {"plane_search_points", actual.counts.plane_search_points}, {"plane_full_points_scored", actual.counts.plane_full_points_scored}, {"plane_trials_evaluated", actual.counts.plane_trials_evaluated}, {"plane_valid_trials", actual.counts.plane_valid_trials}, {"raw_hypotheses", actual.counts.raw_hypotheses}, {"refinement_candidates", actual.counts.refinement_candidates}, {"selected_hypotheses", actual.counts.selected_hypotheses}};
+  for (const auto & [name, expected_value] : expected.counts) {const auto found = actual_counts.find(name); if (found != actual_counts.end()) {EXPECT_EQ(found->second, expected_value) << id << " " << name;}}
+  auto shuffled = points; std::reverse(shuffled.begin(), shuffled.end()); const auto repeat = detect(points), shuffled_result = detect(shuffled); ASSERT_EQ(repeat.poses.size(), actual.poses.size()); ASSERT_EQ(shuffled_result.poses.size(), actual.poses.size()); for (std::size_t index = 0; index < actual.poses.size(); ++index) {EXPECT_EQ(repeat.poses[index].position, actual.poses[index].position); EXPECT_EQ(shuffled_result.poses[index].position, actual.poses[index].position);}
 }
 
 TEST(PythonParity, RuntimeMaterializedGoldenInputsAndExpectedOutputs)

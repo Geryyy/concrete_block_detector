@@ -1,37 +1,55 @@
 concrete_block_detector:
   ros__parameters:
     world_frame: world
-    voxel_leaf_size_m: 0.04
-    ground_distance_threshold_m: 0.05
-    ground_max_iterations: 500
-    ground_max_tilt_deg: 20.0
-    cluster_tolerance_m: 0.10
-    cluster_min_points: 50
-    cluster_max_points: 50000
-    # Partial faces have small spans. Reject only spans larger than the known cuboid.
-    dimension_tolerance_m: 0.30
-    enforce_max_dimensions: true
-    # Require the 0.9 m axis and at least one 0.6 m axis to be observed.
-    minimum_long_axis_span_m: 0.70
-    minimum_secondary_axis_span_m: 0.30
-    # Pose is synthesized from the fitted ground normal and points within this
-    # distance of the cluster's highest point. Side-face returns cannot rotate
-    # the block yaw as they did with whole-cluster PCA.
-    top_slab_thickness_m: 0.08
-    top_plane_distance_threshold_m: 0.02
-    top_slab_min_points: 12
     transform_timeout_s: 0.10
-    # Package defaults remain portable. Put site/bag-specific crops in an
-    # explicit launch overlay rather than silently baking them into discovery.
+    point_cloud_transport: cloudini
+    discover_service: ~/discover_blocks
+    refine_enabled: true
+
+    # Package defaults are portable. Use a workcell/bag overlay to enable a crop.
     scene_bounds:
       enabled: false
       min_m: [-15.0, 2.0, 0.0]
       max_m: [-10.0, 3.5, 1.5]
-    # "cloudini" subscribes to points/cloudini and decodes it in-process via
-    # point_cloud_transport. The standalone launch overrides this to "raw".
-    point_cloud_transport: cloudini
-    # The world model invokes this service for each explicit SCENE_DISCOVERY.
-    # Incoming clouds are cached only; they never autonomously change block state.
-    discover_service: ~/discover_blocks
-    # The published block confidence is the prototype evidence score.
-    refine_enabled: true
+
+    # Mirrors blockpose.DetectionParams. Candidate dimensions are flattened
+    # triples; an empty list means the canonical block dimensions only.
+    detector:
+      voxel_size: 0.04
+      ground_thickness: 0.15
+      ground_ransac_distance: 0.05
+      ground_ransac_iterations: 500
+      ground_normal_min_z: 0.7
+      local_ground_cell_size: 0.5
+      local_ground_clearance: 0.05
+      dbscan_eps: 0.07
+      dbscan_min_points: 5
+      cluster_min_size: 30
+      cluster_max_size: 50000
+      cluster_min_extent_xy: 0.3
+      cluster_max_extent_xy: 1.5
+      region_max_extent_xy: 3.0
+      cluster_min_extent_z: 0.3
+      cluster_max_extent_z: 3.5
+      cluster_max_center_z: 3.0
+      ransac_distance: 0.02
+      ransac_iterations: 1000
+      ransac_search_max_points: 2048
+      ransac_seed: 0
+      max_planes: 5
+      min_inliers: 40
+      top_plane_angle_deg: 30.0
+      side_plane_angle_deg: 20.0
+      max_plane_center_dist: 0.6
+      block_dims: [0.9, 0.6, 0.6]
+      refine_band: 0.10
+      refine_iterations: 2
+      refine_min_points: 20
+      refine_huber_scale: 0.05
+      refine_max_translation: 0.15
+      refine_max_rotation_deg: 20.0
+      min_score: 0.0
+      conflict_alternatives: 1
+      proposal_max_components: 8
+      proposal_max_points: 30000
+      multiscale_proposals: false

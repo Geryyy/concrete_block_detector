@@ -10,6 +10,7 @@
 #include <Eigen/Geometry>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <functional>
 #include <limits>
@@ -58,13 +59,6 @@ detector_core::Points ros_points(const sensor_msgs::msg::PointCloud2 & cloud)
   return points;
 }
 
-detector_core::DetectionParameters core_parameters(const ConcreteBlockDetectorNode &)
-{
-  // Defaults intentionally mirror blockpose.DetectionParams.  Parameters are
-  // declared here when the adapter is constructed; no legacy PCA controls are
-  // reachable from this path.
-  return {};
-}
 }  // namespace
 
 ConcreteBlockDetectorNode::ConcreteBlockDetectorNode(const rclcpp::NodeOptions & options)
@@ -92,6 +86,62 @@ ConcreteBlockDetectorNode::ConcreteBlockDetectorNode(const rclcpp::NodeOptions &
   if (world_frame_.empty() || transform_timeout_s_ < 0.0 || point_cloud_transport_name_.empty() || discover_service_.empty() ||
     scene_bounds_min_m_[0] > scene_bounds_max_m_[0] || scene_bounds_min_m_[1] > scene_bounds_max_m_[1] || scene_bounds_min_m_[2] > scene_bounds_max_m_[2])
   {throw std::invalid_argument("invalid concrete_block_detector parameter");}
+  const auto nonnegative_size = [this](const std::string & name, std::size_t value) {
+      const int configured = declare_parameter<int>(name, static_cast<int>(value));
+      if (configured < 0) {throw std::invalid_argument(name + " must be non-negative");}
+      return static_cast<std::size_t>(configured);
+    };
+  detector_parameters_.voxel_size = declare_parameter<double>("detector.voxel_size", detector_parameters_.voxel_size);
+  detector_parameters_.ground_thickness = declare_parameter<double>("detector.ground_thickness", detector_parameters_.ground_thickness);
+  detector_parameters_.ground_ransac_distance = declare_parameter<double>("detector.ground_ransac_distance", detector_parameters_.ground_ransac_distance);
+  detector_parameters_.ground_normal_min_z = declare_parameter<double>("detector.ground_normal_min_z", detector_parameters_.ground_normal_min_z);
+  detector_parameters_.ground_ransac_iterations = nonnegative_size("detector.ground_ransac_iterations", detector_parameters_.ground_ransac_iterations);
+  detector_parameters_.local_ground_cell_size = declare_parameter<double>("detector.local_ground_cell_size", detector_parameters_.local_ground_cell_size);
+  detector_parameters_.local_ground_clearance = declare_parameter<double>("detector.local_ground_clearance", detector_parameters_.local_ground_clearance);
+  detector_parameters_.dbscan_eps = declare_parameter<double>("detector.dbscan_eps", detector_parameters_.dbscan_eps);
+  detector_parameters_.dbscan_min_points = nonnegative_size("detector.dbscan_min_points", detector_parameters_.dbscan_min_points);
+  detector_parameters_.cluster_min_size = nonnegative_size("detector.cluster_min_size", detector_parameters_.cluster_min_size);
+  detector_parameters_.cluster_max_size = nonnegative_size("detector.cluster_max_size", detector_parameters_.cluster_max_size);
+  detector_parameters_.cluster_min_extent_xy = declare_parameter<double>("detector.cluster_min_extent_xy", detector_parameters_.cluster_min_extent_xy);
+  detector_parameters_.cluster_max_extent_xy = declare_parameter<double>("detector.cluster_max_extent_xy", detector_parameters_.cluster_max_extent_xy);
+  detector_parameters_.region_max_extent_xy = declare_parameter<double>("detector.region_max_extent_xy", detector_parameters_.region_max_extent_xy);
+  detector_parameters_.cluster_min_extent_z = declare_parameter<double>("detector.cluster_min_extent_z", detector_parameters_.cluster_min_extent_z);
+  detector_parameters_.cluster_max_extent_z = declare_parameter<double>("detector.cluster_max_extent_z", detector_parameters_.cluster_max_extent_z);
+  detector_parameters_.cluster_max_center_z = declare_parameter<double>("detector.cluster_max_center_z", detector_parameters_.cluster_max_center_z);
+  detector_parameters_.ransac_distance = declare_parameter<double>("detector.ransac_distance", detector_parameters_.ransac_distance);
+  detector_parameters_.ransac_iterations = nonnegative_size("detector.ransac_iterations", detector_parameters_.ransac_iterations);
+  detector_parameters_.ransac_search_max_points = nonnegative_size("detector.ransac_search_max_points", detector_parameters_.ransac_search_max_points);
+  detector_parameters_.ransac_seed = static_cast<std::uint64_t>(nonnegative_size("detector.ransac_seed", detector_parameters_.ransac_seed));
+  detector_parameters_.max_planes = nonnegative_size("detector.max_planes", detector_parameters_.max_planes);
+  detector_parameters_.min_inliers = nonnegative_size("detector.min_inliers", detector_parameters_.min_inliers);
+  detector_parameters_.top_plane_angle_deg = declare_parameter<double>("detector.top_plane_angle_deg", detector_parameters_.top_plane_angle_deg);
+  detector_parameters_.side_plane_angle_deg = declare_parameter<double>("detector.side_plane_angle_deg", detector_parameters_.side_plane_angle_deg);
+  detector_parameters_.max_plane_center_dist = declare_parameter<double>("detector.max_plane_center_dist", detector_parameters_.max_plane_center_dist);
+  detector_parameters_.min_score = declare_parameter<double>("detector.min_score", detector_parameters_.min_score);
+  detector_parameters_.conflict_alternatives = nonnegative_size("detector.conflict_alternatives", detector_parameters_.conflict_alternatives);
+  if (detector_parameters_.conflict_alternatives < 1U) {
+    throw std::invalid_argument("detector.conflict_alternatives must be at least one");
+  }
+  detector_parameters_.proposal_max_components = nonnegative_size("detector.proposal_max_components", detector_parameters_.proposal_max_components);
+  detector_parameters_.proposal_max_points = nonnegative_size("detector.proposal_max_points", detector_parameters_.proposal_max_points);
+  detector_parameters_.multiscale_proposals = declare_parameter<bool>("detector.multiscale_proposals", detector_parameters_.multiscale_proposals);
+  const auto dims = declare_parameter<std::vector<double>>(
+    "detector.block_dims", {0.9, 0.6, 0.6});
+  if (dims.size() != 3U) {throw std::invalid_argument("detector.block_dims must contain three values");}
+  detector_parameters_.block_dims = {dims[0], dims[1], dims[2]};
+  const auto candidate_dims = declare_parameter<std::vector<double>>(
+    "detector.candidate_dims", std::vector<double>{});
+  if (candidate_dims.size() % 3U != 0U) {throw std::invalid_argument("detector.candidate_dims must be a flattened sequence of triples");}
+  for (std::size_t index = 0; index < candidate_dims.size(); index += 3U) {
+    detector_parameters_.candidate_dims.push_back(
+      {candidate_dims[index], candidate_dims[index + 1U], candidate_dims[index + 2U]});
+  }
+  detector_parameters_.refine_band = declare_parameter<double>("detector.refine_band", detector_parameters_.refine_band);
+  detector_parameters_.refine_iterations = nonnegative_size("detector.refine_iterations", detector_parameters_.refine_iterations);
+  detector_parameters_.refine_min_points = nonnegative_size("detector.refine_min_points", detector_parameters_.refine_min_points);
+  detector_parameters_.refine_huber_scale = declare_parameter<double>("detector.refine_huber_scale", detector_parameters_.refine_huber_scale);
+  detector_parameters_.refine_max_translation = declare_parameter<double>("detector.refine_max_translation", detector_parameters_.refine_max_translation);
+  detector_parameters_.refine_max_rotation_deg = declare_parameter<double>("detector.refine_max_rotation_deg", detector_parameters_.refine_max_rotation_deg);
   poses_pub_ = create_publisher<geometry_msgs::msg::PoseArray>("poses", 10);
   markers_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>("markers", 10);
   discover_blocks_srv_ = create_service<concrete_block_world_model_interfaces::srv::DiscoverBlocks>(discover_service_, std::bind(&ConcreteBlockDetectorNode::handle_discover_blocks, this, std::placeholders::_1, std::placeholders::_2));
@@ -111,13 +161,33 @@ void ConcreteBlockDetectorNode::cloud_callback(const sensor_msgs::msg::PointClou
   if (cloud->header.frame_id.empty()) {RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000, "Ignoring point cloud without a frame_id"); return;}
   sensor_msgs::msg::PointCloud2 world;
   try {const auto transform = tf_buffer_.lookupTransform(world_frame_, cloud->header.frame_id, cloud->header.stamp, tf2::durationFromSec(transform_timeout_s_)); tf2::doTransform(*cloud, world, transform);} catch (const tf2::TransformException & error) {RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000, "Ignoring cloud: no transform %s -> %s at its timestamp: %s", cloud->header.frame_id.c_str(), world_frame_.c_str(), error.what()); return;}
-  std::lock_guard<std::mutex> lock(cached_cloud_mutex_); cached_cloud_world_ = std::make_shared<sensor_msgs::msg::PointCloud2>(world);
+  {
+    std::lock_guard<std::mutex> lock(cached_cloud_mutex_);
+    cached_cloud_world_ = std::make_shared<sensor_msgs::msg::PointCloud2>(world);
+  }
+  cached_cloud_cv_.notify_all();
 }
 
 void ConcreteBlockDetectorNode::handle_discover_blocks(const std::shared_ptr<concrete_block_world_model_interfaces::srv::DiscoverBlocks::Request> request, std::shared_ptr<concrete_block_world_model_interfaces::srv::DiscoverBlocks::Response> response)
 {
-  (void)request; sensor_msgs::msg::PointCloud2::SharedPtr cloud; {std::lock_guard<std::mutex> lock(cached_cloud_mutex_); cloud = cached_cloud_world_;}
-  if (!cloud) {response->success = false; response->message = "No valid world-frame point cloud has been received yet."; return;}
+  if (!std::isfinite(request->timeout_s) || request->timeout_s <= 0.0F) {
+    response->success = false;
+    response->message = "timeout_s must be positive.";
+    return;
+  }
+  sensor_msgs::msg::PointCloud2::SharedPtr cloud;
+  {
+    std::unique_lock<std::mutex> lock(cached_cloud_mutex_);
+    const auto ready = cached_cloud_cv_.wait_for(
+      lock, std::chrono::duration<float>(request->timeout_s),
+      [this]() {return static_cast<bool>(cached_cloud_world_);});
+    if (!ready) {
+      response->success = false;
+      response->message = "Timed out waiting for a valid world-frame point cloud.";
+      return;
+    }
+    cloud = cached_cloud_world_;
+  }
   try {response->blocks = discover(*cloud); response->success = true; response->message = "Discovered " + std::to_string(response->blocks.blocks.size()) + " block(s).";} catch (const std::exception & error) {response->success = false; response->message = std::string("Discovery failed: ") + error.what(); RCLCPP_ERROR(get_logger(), "%s", response->message.c_str());}
 }
 
@@ -128,8 +198,8 @@ concrete_block_world_model_interfaces::msg::BlockArray ConcreteBlockDetectorNode
   visualization_msgs::msg::MarkerArray markers; visualization_msgs::msg::Marker clear; clear.header = cloud_world.header; clear.action = visualization_msgs::msg::Marker::DELETEALL; markers.markers.push_back(clear);
   auto points = ros_points(cloud_world);
   if (scene_bounds_enabled_) {points.erase(std::remove_if(points.begin(), points.end(), [this](const auto & point) {return point.x() < scene_bounds_min_m_[0] || point.x() > scene_bounds_max_m_[0] || point.y() < scene_bounds_min_m_[1] || point.y() > scene_bounds_max_m_[1] || point.z() < scene_bounds_min_m_[2] || point.z() > scene_bounds_max_m_[2];}), points.end());}
-  auto detection = refine_enabled_ ? detector_core::detect(points, core_parameters(*this)) :
-    detector_core::detect_without_refinement(points, core_parameters(*this));
+  auto detection = refine_enabled_ ? detector_core::detect(points, detector_parameters_) :
+    detector_core::detect_without_refinement(points, detector_parameters_);
   int marker_id = 0; for (const auto & hypothesis : detection.hypotheses) {const Eigen::Quaterniond orientation(hypothesis.pose.rotation); geometry_msgs::msg::Pose pose; pose.position.x = hypothesis.pose.position.x(); pose.position.y = hypothesis.pose.position.y(); pose.position.z = hypothesis.pose.position.z(); pose.orientation.x = orientation.x(); pose.orientation.y = orientation.y(); pose.orientation.z = orientation.z(); pose.orientation.w = orientation.w(); poses.poses.push_back(pose); markers.markers.push_back(make_marker(poses.header, pose, hypothesis.pose.dims, marker_id++)); concrete_block_world_model_interfaces::msg::Block block; block.pose = pose; block.pose_status = concrete_block_world_model_interfaces::msg::Block::POSE_COARSE; block.task_status = concrete_block_world_model_interfaces::msg::Block::TASK_FREE; block.confidence = static_cast<float>(std::clamp(hypothesis.evidence.score, 0.0, 1.0)); block.last_seen = cloud_world.header.stamp; result.blocks.push_back(std::move(block));}
   poses_pub_->publish(poses); markers_pub_->publish(markers); return result;
 }

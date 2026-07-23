@@ -32,7 +32,7 @@ Comparison acceptance criteria:
 | Common integer stage counts | Exact |
 | Repeated and shuffled input | Byte-identical serialised C++ result |
 
-The tolerances allow normal C++/PCL versus NumPy/SciPy floating point rounding;
+The tolerances allow normal C++/NumPy/SciPy floating point rounding;
 they do **not** allow a different detection route (for example the legacy
 whole-cluster PCA cuboid).  New fixtures must be generated with the committed
 Python prototype and reviewed with their source manifest change.
