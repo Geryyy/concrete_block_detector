@@ -45,10 +45,48 @@ inline Eigen::Matrix3d exp_so3(const Point & v)
   const Eigen::Matrix3d axis = skew(v / angle);
   return Eigen::Matrix3d::Identity() + std::sin(angle) * axis + (1.0 - std::cos(angle)) * axis * axis;
 }
+// Right Jacobian of SO(3): for R(w) = R0 * exp_so3(w), d(R(w)^T v)/dw =
+// skew(R(w)^T v) * right_jacobian_so3(w). Needed because refine_pose's x.head<3>()
+// is the *finite* right-multiplied rotation vector, not an infinitesimal
+// perturbation, so the plain skew(q) term alone only matches a central-difference
+// Jacobian at w == 0 (verified numerically; the two diverge away from w == 0).
+inline Eigen::Matrix3d right_jacobian_so3(const Point & v)
+{
+  const double angle = v.norm();
+  const Eigen::Matrix3d k = skew(v);
+  if (angle < 1.0e-8) {return Eigen::Matrix3d::Identity() - 0.5 * k;}
+  const double angle2 = angle * angle;
+  return Eigen::Matrix3d::Identity() - ((1.0 - std::cos(angle)) / angle2) * k +
+    ((angle - std::sin(angle)) / (angle2 * angle)) * k * k;
+}
 inline double box_sdf(const Point & local, const Point & half)
 {
   const Point delta = local.cwiseAbs() - half;
   return delta.cwiseMax(Point::Zero()).norm() + std::min(delta.maxCoeff(), 0.0);
+}
+// box_sdf plus its gradient w.r.t. `local`. Exterior (some d_k > 0): gradient of
+// the positive-part norm, zero on components already clipped to 0. Interior (all
+// d_k <= 0, including the on-surface boundary d.maxCoeff() == 0): gradient of
+// max_k d_k, a single nonzero component at the argmax. Both branches are
+// subgradients at their shared boundary/kinks; any subgradient is valid there.
+inline double box_sdf_gradient(const Point & local, const Point & half, Point * gradient)
+{
+  const Point delta = local.cwiseAbs() - half;
+  const Point outside = delta.cwiseMax(Point::Zero());
+  const double outside_norm = outside.norm();
+  if (gradient != nullptr) {
+    Point g = Point::Zero();
+    if (delta.maxCoeff() > 0.0) {
+      if (outside_norm > 0.0) {
+        for (int k = 0; k < 3; ++k) {g[k] = (local[k] >= 0.0 ? 1.0 : -1.0) * outside[k] / outside_norm;}
+      }
+    } else {
+      Eigen::Index k_max = 0; delta.maxCoeff(&k_max);
+      g[k_max] = local[k_max] >= 0.0 ? 1.0 : -1.0;
+    }
+    *gradient = g;
+  }
+  return outside_norm + std::min(delta.maxCoeff(), 0.0);
 }
 inline std::vector<double> surface_distance(const CuboidPose & pose, const Points & points)
 {
@@ -120,7 +158,10 @@ inline RefineResult refine_pose(const CuboidPose & initial, const Points & point
 {
   RefineDiagnostics diagnostics;
   diagnostics.point_count = points.size();
-  if (points.size() < params.min_points || params.huber_scale <= 0.0 || params.max_evaluations < 7U) {return {initial, false, diagnostics};}
+  // The Jacobian is analytic now, so every LM trial (accepted or rejected)
+  // costs exactly one residual evaluation; max_evaluations bounds that count
+  // directly. Require at least the initial evaluation plus one trial.
+  if (points.size() < params.min_points || params.huber_scale <= 0.0 || params.max_evaluations < 2U) {return {initial, false, diagnostics};}
   diagnostics.attempted = true;
   const Point half(initial.dims[0] / 2.0, initial.dims[1] / 2.0, initial.dims[2] / 2.0);
   const auto residuals = [&initial, &points, &half](const Eigen::Matrix<double, 6, 1> & x) {
@@ -133,28 +174,66 @@ inline RefineResult refine_pose(const CuboidPose & initial, const Points & point
   Eigen::Matrix<double, 6, 1> x = Eigen::Matrix<double, 6, 1>::Zero();
   std::vector<double> current = residuals(x); std::size_t evaluations = 1U; double cost = cost_for(current);
   diagnostics.initial_cost = cost;
-  constexpr double h = 1.0e-5;
-  for (std::size_t iteration = 0; evaluations + 12U <= params.max_evaluations && iteration < 30U; ++iteration) {
+  // Levenberg-Marquardt with Marquardt (diagonal-scaled) damping: (JtWJ +
+  // lambda*diag(JtWJ)) delta = -JtW r. Accept a trial and shrink lambda when
+  // it improves the Huber cost; reject and grow lambda otherwise. lambda
+  // persists across outer iterations (re-scaled against each iteration's own
+  // diagonal), which is the standard Marquardt scheme. Replaces the old fixed
+  // 1e-8 ridge plus first-improvement backtracking line search.
+  constexpr double kTau = 1.0e-3;
+  constexpr double kLambdaDown = 1.0 / 3.0;
+  constexpr double kLambdaUp = 2.0;
+  constexpr double kLambdaMax = 1.0e12;
+  constexpr double kLambdaMin = 1.0e-12;
+  constexpr double kDiagFloor = 1.0e-12;
+  constexpr double kStepTol = 1.0e-10;
+  constexpr std::size_t kMaxIterations = 100U;
+  constexpr std::size_t kMaxLambdaTrials = 30U;
+  double lambda = -1.0;  // set from the first iteration's own diagonal scale
+  bool keep_iterating = true;
+  for (std::size_t iteration = 0; keep_iterating && iteration < kMaxIterations && evaluations < params.max_evaluations; ++iteration) {
     diagnostics.iterations = iteration + 1U;
+    const Eigen::Matrix3d r = initial.rotation * exp_so3(x.head<3>());
+    const Eigen::Matrix3d jr = right_jacobian_so3(x.head<3>());
     Eigen::MatrixXd jacobian(points.size(), 6);
-    for (int column = 0; column < 6; ++column) {
-      auto plus = x; auto minus = x; plus[column] += h; minus[column] -= h;
-      const auto forward = residuals(plus); const auto backward = residuals(minus); evaluations += 2U;
-      for (std::size_t row = 0; row < points.size(); ++row) {jacobian(static_cast<Eigen::Index>(row), column) = (forward[row] - backward[row]) / (2.0 * h);}
+    for (std::size_t row = 0; row < points.size(); ++row) {
+      const Point q = r.transpose() * (points[row] - (initial.position + x.tail<3>()));
+      Point gradient;
+      box_sdf_gradient(q, half, &gradient);
+      // J_row = g^T * [skew(q), -R^T], rotation block additionally chain-ruled
+      // through the right Jacobian (see right_jacobian_so3 comment above).
+      const Eigen::Matrix<double, 1, 3> rotation_block = (gradient.transpose() * skew(q)) * jr;
+      const Eigen::Matrix<double, 1, 3> translation_block = -(gradient.transpose() * r.transpose());
+      jacobian.block<1, 3>(static_cast<Eigen::Index>(row), 0) = rotation_block;
+      jacobian.block<1, 3>(static_cast<Eigen::Index>(row), 3) = translation_block;
     }
-    Eigen::VectorXd weighted(points.size());
+    Eigen::MatrixXd weighted_jacobian = jacobian;
+    Eigen::VectorXd weighted_residual(points.size());
     for (std::size_t row = 0; row < points.size(); ++row) {
       const double weight = std::abs(current[row]) <= params.huber_scale ? 1.0 : params.huber_scale / std::abs(current[row]);
-      jacobian.row(static_cast<Eigen::Index>(row)) *= std::sqrt(weight); weighted[static_cast<Eigen::Index>(row)] = std::sqrt(weight) * current[row];
+      const double root_weight = std::sqrt(weight);
+      weighted_jacobian.row(static_cast<Eigen::Index>(row)) *= root_weight;
+      weighted_residual[static_cast<Eigen::Index>(row)] = root_weight * current[row];
     }
-    const Eigen::Matrix<double, 6, 6> normal = jacobian.transpose() * jacobian + 1.0e-8 * Eigen::Matrix<double, 6, 6>::Identity();
-    const Eigen::Matrix<double, 6, 1> delta = normal.ldlt().solve(-jacobian.transpose() * weighted);
-    if (!delta.allFinite() || delta.norm() < 1.0e-8) {break;}
+    const Eigen::Matrix<double, 6, 6> normal = weighted_jacobian.transpose() * weighted_jacobian;
+    const Eigen::Matrix<double, 6, 1> gradient_vector = weighted_jacobian.transpose() * weighted_residual;
+    const Eigen::Matrix<double, 6, 1> scale = normal.diagonal().cwiseMax(kDiagFloor);
+    if (lambda < 0.0) {lambda = kTau * scale.maxCoeff();}
     bool accepted = false;
-    for (double step = 1.0; step >= 1.0 / 64.0 && evaluations < params.max_evaluations; step *= 0.5) {
-      const auto proposal = x + step * delta; const auto candidate = residuals(proposal); ++evaluations;
+    for (std::size_t trial = 0; trial < kMaxLambdaTrials && lambda <= kLambdaMax && evaluations < params.max_evaluations; ++trial) {
+      Eigen::Matrix<double, 6, 6> damped = normal; damped.diagonal() += lambda * scale;
+      const Eigen::Matrix<double, 6, 1> delta = damped.ldlt().solve(-gradient_vector);
+      if (!delta.allFinite()) {lambda = std::min(kLambdaMax, lambda * kLambdaUp); continue;}
+      const auto proposal = x + delta; const auto candidate = residuals(proposal); ++evaluations;
       const double candidate_cost = cost_for(candidate);
-      if (candidate_cost < cost) {x = proposal; current = candidate; cost = candidate_cost; accepted = true; break;}
+      if (candidate_cost < cost) {
+        const double step_norm = delta.norm(); const double improvement = cost - candidate_cost;
+        x = proposal; current = candidate; cost = candidate_cost;
+        lambda = std::max(kLambdaMin, lambda * kLambdaDown); accepted = true;
+        if (step_norm < kStepTol || improvement <= kStepTol * std::max(1.0, cost)) {keep_iterating = false;}
+        break;
+      }
+      lambda = std::min(kLambdaMax, lambda * kLambdaUp);
     }
     if (!accepted) {break;}
   }
