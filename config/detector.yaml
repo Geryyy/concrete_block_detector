@@ -1,0 +1,29 @@
+concrete_block_detector:
+  ros__parameters:
+    world_frame: world
+    voxel_leaf_size_m: 0.04
+    ground_distance_threshold_m: 0.05
+    ground_max_iterations: 500
+    ground_max_tilt_deg: 20.0
+    cluster_tolerance_m: 0.10
+    cluster_min_points: 50
+    cluster_max_points: 50000
+    # Partial faces have small spans. Reject only spans larger than the known cuboid.
+    dimension_tolerance_m: 0.30
+    enforce_max_dimensions: true
+    # Require the 0.9 m axis and at least one 0.6 m axis to be observed.
+    minimum_long_axis_span_m: 0.70
+    minimum_secondary_axis_span_m: 0.30
+    transform_timeout_s: 0.10
+    # The detector writes coarse, free blocks to the canonical world model used
+    # by the wall planner and behavior tree. No legacy segmentation, cutout or
+    # registration services are part of this path.
+    world_model:
+      enabled: true
+      frame_id: world
+      get_coarse_blocks_service: /world_model_node/get_coarse_blocks
+      upsert_block_service: /world_model_node/upsert_block
+      id_prefix: detected_block_
+      association_max_distance_m: 0.45
+      cache_refresh_s: 1.0
+      confidence: 0.8
