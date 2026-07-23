@@ -16,6 +16,7 @@ find_package(tf2_sensor_msgs REQUIRED)
 find_package(point_cloud_transport REQUIRED)
 find_package(concrete_block_world_model_interfaces REQUIRED)
 find_package(Eigen3 REQUIRED)
+find_package(yaml-cpp REQUIRED)
 
 add_executable(concrete_block_detector_node
   src/concrete_block_detector_node.cpp
@@ -27,7 +28,16 @@ ament_target_dependencies(concrete_block_detector_node
   concrete_block_world_model_interfaces
 )
 
-install(TARGETS concrete_block_detector_node
+# Offline, reproducible runner for recorded Blockpose snapshots.  It uses the
+# same header-only detector core as the ROS adapter, without requiring a ROS
+# graph or point-cloud transport plugin.
+add_executable(concrete_block_detector_snapshot_runner
+  src/concrete_block_detector_snapshot_runner.cpp
+)
+target_include_directories(concrete_block_detector_snapshot_runner PRIVATE include)
+target_link_libraries(concrete_block_detector_snapshot_runner Eigen3::Eigen yaml-cpp)
+
+install(TARGETS concrete_block_detector_node concrete_block_detector_snapshot_runner
   DESTINATION lib/${PROJECT_NAME}
 )
 install(DIRECTORY launch config DESTINATION share/${PROJECT_NAME})

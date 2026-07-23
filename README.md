@@ -37,6 +37,26 @@ The detector does not own IDs or world state. Its cloud callback only caches a
 valid world-frame cloud; `~/discover_blocks` returns anonymous coarse poses.
 `world_model_node` owns association, IDs, and the single atomic world update.
 
+## Offline snapshot runner
+
+`concrete_block_detector_snapshot_runner` runs the same C++ core on a recorded
+Blockpose registration snapshot. It reads the snapshot's ASCII `cloud.pcd` and
+per-snapshot `tf.yaml`, transforms the cloud into `world`, rebuilds the
+ray-based evidence context, and writes JSON to stdout. For the deployed
+`grip_at_top` configuration, pass the package defaults followed by the replay
+overlay:
+
+```bash
+ros2 run concrete_block_detector concrete_block_detector_snapshot_runner \
+  --params /workspaces/ros2_baustelle_ws/src/concrete_block_stack/concrete_block_detector/config/detector.yaml \
+  --params /workspaces/ros2_baustelle_ws/src/concrete_block_stack/concrete_block_perception/config/grip_at_top_detector_scene_discovery.yaml \
+  --snapshot /workspaces/ros2_baustelle_ws/src/concrete_block_stack/blockpose/data/registration_snapshots/1783428141_224458752_seq3
+```
+
+Repeat `--snapshot` to emit one JSON record per snapshot. The runner only
+supports the repository's `DATA ascii`, `FIELDS x y z` PCD format and reports
+an error for other encodings rather than silently changing detector input.
+
 `scene_bounds` optionally crops the transformed cloud before ground removal and
 clustering. The shipped bounds are calibrated to the three-block staging area
 in `/home/vscode/Documents/2026-07-07-grip_at_top`, excluding the crane and

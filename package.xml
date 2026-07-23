@@ -17,6 +17,7 @@
   <depend>tf2_sensor_msgs</depend>
   <depend>point_cloud_transport</depend>
   <depend>concrete_block_world_model_interfaces</depend>
+  <depend>yaml-cpp</depend>
   <exec_depend>cloudini_ros</exec_depend>
   <test_depend>ament_cmake_gtest</test_depend>
 
