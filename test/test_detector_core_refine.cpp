@@ -86,6 +86,73 @@ std::string solver_comparison(
   return stream.str();
 }
 
+Eigen::Matrix<double, 6, 1> correction_from_json(const nlohmann::json & values)
+{
+  EXPECT_EQ(values.size(), 6U);
+  Eigen::Matrix<double, 6, 1> correction;
+  for (int index = 0; index < 6; ++index) {
+    correction[index] = values.at(static_cast<std::size_t>(index)).get<double>();
+  }
+  return correction;
+}
+
+// This answers the narrowest useful solver question before changing any
+// optimization code: does SciPy's reported correction improve the *same C++
+// SDF+Huber objective more than the C++ correction does?  If it does, then the
+// remaining mismatch is solver trajectory/termination, not objective math.
+TEST(Refine, ScatterPassZeroComparesPythonAndCxxObjective)
+{
+  const std::filesystem::path blockpose(BLOCKPOSE_SOURCE_ROOT);
+  const std::filesystem::path fixture_dir = std::filesystem::temp_directory_path() /
+    ("concrete_block_detector_refine_objective_" + std::to_string(
+      std::chrono::steady_clock::now().time_since_epoch().count()));
+  std::filesystem::remove_all(fixture_dir);
+  const std::string command =
+    "PYTHONPATH='" + (blockpose / "python").string() + "' python3 '" +
+    (blockpose / "tools/export_cpp_parity_fixture.py").string() + "' --manifest '" +
+    (blockpose.parent_path() / "concrete_block_detector/test/parity/fixtures_manifest.json").string() +
+    "' --output '" + fixture_dir.string() + "' --plain-text";
+  ASSERT_EQ(std::system(command.c_str()), 0);
+
+  std::ifstream stream(fixture_dir / "scatter_and_clutter.refinement.json");
+  ASSERT_TRUE(stream.is_open());
+  nlohmann::json fixture;
+  stream >> fixture;
+  std::vector<CuboidPose> initial;
+  for (const auto & value : fixture.at("initial")) {initial.push_back(cuboid_from_json(value));}
+  ASSERT_FALSE(initial.empty());
+  const Points points = load_xyz(fixture_dir / "scatter_and_clutter.refine_points.xyz");
+  const auto assigned = assign_points(initial, points, 0.10);
+  ASSERT_FALSE(assigned.at(0).empty());
+  const auto actual = refine_pose(initial.at(0), assigned.at(0));
+  ASSERT_TRUE(actual.diagnostics.attempted);
+  const auto & solver = fixture.at("passes").at(0).at("solver").at(0);
+  const auto python_correction = correction_from_json(solver.at("solution_x"));
+  Eigen::Matrix<double, 6, 1> cxx_correction;
+  for (int index = 0; index < 6; ++index) {
+    cxx_correction[index] = actual.diagnostics.correction[static_cast<std::size_t>(index)];
+  }
+  const double python_objective = refinement_huber_objective(
+    initial.at(0), assigned.at(0), python_correction, 0.05);
+  const double cxx_objective = refinement_huber_objective(
+    initial.at(0), assigned.at(0), cxx_correction, 0.05);
+  const double objective_tolerance = 1.0e-10;
+  ::testing::Test::RecordProperty("python_solution_cxx_objective", std::to_string(python_objective));
+  ::testing::Test::RecordProperty("cxx_solution_cxx_objective", std::to_string(cxx_objective));
+  ::testing::Test::RecordProperty(
+    "python_solution_is_no_worse", python_objective <= cxx_objective + objective_tolerance ? "true" : "false");
+  SCOPED_TRACE(
+    "scatter_and_clutter pass=0 candidate=0 cxx_objective_at_python_solution=" +
+    std::to_string(python_objective) + " cxx_objective_at_cxx_solution=" +
+    std::to_string(cxx_objective) + " python_reported_cost=" +
+    std::to_string(solver.at("cost").get<double>()) + " cxx_reported_final_cost=" +
+    std::to_string(actual.diagnostics.final_cost));
+  EXPECT_NEAR(python_objective, solver.at("cost").get<double>(), 1.0e-10);
+  EXPECT_NEAR(cxx_objective, actual.diagnostics.final_cost, 1.0e-12);
+  // SciPy's trust-region solution should be no worse in this shared objective.
+  EXPECT_LE(python_objective, cxx_objective + objective_tolerance);
+}
+
 // This is intentionally a separate gate from detector parity. It supplies the
 // C++ optimizer with the exact Python selected initial poses and assignment
 // cloud, so a failure cannot be attributed to RANSAC, NMS, or association.
