@@ -49,8 +49,60 @@ struct RawHypothesisLineage
   Pose synthesized_pose;
   HypothesisEvidence evidence;
   double top_support_height_m{0.0};
+  // Diagnostic only. Dims siblings share one top patch and differ by 90 degrees,
+  // so the patch's own observed in-plane extents are the only quantity that can
+  // say which axis is the 0.9 m one; the per-hypothesis evidence cannot, because
+  // both siblings explain the same returns. Recorded to test that, not consumed.
+  double top_patch_extent_major_m{0.0}, top_patch_extent_minor_m{0.0};
+  // Extent along the synthesized pose's own local X and Y, so a sibling can be
+  // compared against the axis length it actually claims.
+  double top_patch_extent_local_x_m{0.0}, top_patch_extent_local_y_m{0.0};
+  std::size_t top_patch_inliers{0};
   std::string fate{"geometric_rejected"};
 };
+
+// In-plane extents of a fitted patch: robust (2nd..98th percentile) spans along
+// the patch's own principal in-plane axes, and along two supplied world axes.
+inline void patch_in_plane_extents(
+  const PlanePatch & patch, const Point & local_x, const Point & local_y,
+  double * major, double * minor, double * along_x, double * along_y)
+{
+  if (patch.points.size() < 3U) {return;}
+  const Point normal = patch.normal.normalized();
+  const Point center = patch.centroid;
+  Point first = std::abs(normal.x()) > .9 ? Point::UnitY() : Point::UnitX();
+  first = (first - first.dot(normal) * normal).normalized();
+  const Point second = normal.cross(first);
+  std::vector<double> u, v, x, y;
+  u.reserve(patch.points.size()); v.reserve(patch.points.size());
+  x.reserve(patch.points.size()); y.reserve(patch.points.size());
+  Eigen::Matrix2d covariance = Eigen::Matrix2d::Zero();
+  for (const auto & point : patch.points) {
+    const Point delta = point - center;
+    const double a = delta.dot(first), b = delta.dot(second);
+    u.push_back(a); v.push_back(b);
+    x.push_back(delta.dot(local_x)); y.push_back(delta.dot(local_y));
+    covariance.noalias() += Eigen::Vector2d(a, b) * Eigen::Vector2d(a, b).transpose();
+  }
+  const Eigen::SelfAdjointEigenSolver<Eigen::Matrix2d> solve(covariance);
+  const auto span = [](std::vector<double> values) {
+      return percentile_linear(values, 98.0) - percentile_linear(std::move(values), 2.0);
+    };
+  if (solve.info() == Eigen::Success) {
+    const Eigen::Vector2d major_axis = solve.eigenvectors().col(1);
+    const Eigen::Vector2d minor_axis = solve.eigenvectors().col(0);
+    std::vector<double> along_major, along_minor;
+    along_major.reserve(u.size()); along_minor.reserve(u.size());
+    for (std::size_t index = 0; index < u.size(); ++index) {
+      along_major.push_back(major_axis.x() * u[index] + major_axis.y() * v[index]);
+      along_minor.push_back(minor_axis.x() * u[index] + minor_axis.y() * v[index]);
+    }
+    *major = span(std::move(along_major));
+    *minor = span(std::move(along_minor));
+  }
+  *along_x = span(std::move(x));
+  *along_y = span(std::move(y));
+}
 struct CuboidHypothesis {Pose pose; HypothesisEvidence evidence; std::optional<double> proposal_scale_m; double support_height_m{0.0}; std::optional<std::size_t> lineage_index;};
 struct PlaneFitCounts {std::size_t calls{0}, search_points{0}, full_points_scored{0}, trials_evaluated{0}, valid_trials{0};};
 

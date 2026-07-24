@@ -277,6 +277,11 @@ json raw_lineage_json(const detector_core::RawHypothesisLineage & lineage)
     {"candidate_dims", lineage.candidate_dims}, {"top_only", lineage.top_only},
     {"synthesized_pose", pose},
     {"top_support_height_m", lineage.top_support_height_m},
+    {"top_patch_inliers", lineage.top_patch_inliers},
+    {"top_patch_extent_major_m", lineage.top_patch_extent_major_m},
+    {"top_patch_extent_minor_m", lineage.top_patch_extent_minor_m},
+    {"top_patch_extent_local_x_m", lineage.top_patch_extent_local_x_m},
+    {"top_patch_extent_local_y_m", lineage.top_patch_extent_local_y_m},
     {"accepted_to_raw", lineage.accepted_to_raw},
     {"passed_score_threshold", lineage.passed_score_threshold}, {"fate", lineage.fate},
   };

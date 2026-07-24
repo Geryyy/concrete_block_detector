@@ -130,6 +130,11 @@ inline DetectionResult detect_without_refinement(
         lineage.top_normal = pair.first->normal; lineage.top_centroid = pair.first->centroid;
         if (pair.second != nullptr) {lineage.side_normal = pair.second->normal; lineage.side_centroid = pair.second->centroid;}
         lineage.candidate_dims = dims; lineage.top_only = pair.second == nullptr; lineage.synthesized_pose = pose; lineage.evidence = hypothesis.evidence; lineage.top_support_height_m = top_height;
+        lineage.top_patch_inliers = pair.first->points.size();
+        patch_in_plane_extents(
+          *pair.first, pose.rotation.col(0), pose.rotation.col(1),
+          &lineage.top_patch_extent_major_m, &lineage.top_patch_extent_minor_m,
+          &lineage.top_patch_extent_local_x_m, &lineage.top_patch_extent_local_y_m);
         lineage.accepted_to_raw = top_height >= dims[2] * .70 && supported;
         lineage.fate = lineage.accepted_to_raw ? "raw" : "geometric_rejected";
         result.raw_lineage.push_back(std::move(lineage));
