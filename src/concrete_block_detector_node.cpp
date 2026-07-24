@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <functional>
 #include <limits>
 #include <stdexcept>
@@ -249,7 +250,7 @@ concrete_block_world_model_interfaces::msg::BlockArray ConcreteBlockDetectorNode
   if (scene_bounds_enabled_) {points.erase(std::remove_if(points.begin(), points.end(), [this](const auto & point) {return point.x() < scene_bounds_min_m_[0] || point.x() > scene_bounds_max_m_[0] || point.y() < scene_bounds_min_m_[1] || point.y() > scene_bounds_max_m_[1] || point.z() < scene_bounds_min_m_[2] || point.z() > scene_bounds_max_m_[2];}), points.end());}
   auto detection = refine_enabled_ ? detector_core::detect(points, detector_parameters_, &sensor_context) :
     detector_core::detect_without_refinement(points, detector_parameters_, &sensor_context);
-  int marker_id = 0; for (const auto & hypothesis : detection.hypotheses) {const Eigen::Quaterniond orientation(hypothesis.pose.rotation); geometry_msgs::msg::Pose pose; pose.position.x = hypothesis.pose.position.x(); pose.position.y = hypothesis.pose.position.y(); pose.position.z = hypothesis.pose.position.z(); pose.orientation.x = orientation.x(); pose.orientation.y = orientation.y(); pose.orientation.z = orientation.z(); pose.orientation.w = orientation.w(); poses.poses.push_back(pose); markers.markers.push_back(make_marker(poses.header, pose, hypothesis.pose.dims, marker_id++)); concrete_block_world_model_interfaces::msg::Block block; block.pose = pose; block.pose_status = concrete_block_world_model_interfaces::msg::Block::POSE_COARSE; block.task_status = concrete_block_world_model_interfaces::msg::Block::TASK_FREE; block.confidence = static_cast<float>(std::clamp(hypothesis.evidence.score, 0.0, 1.0)); block.last_seen = cloud_world.header.stamp; result.blocks.push_back(std::move(block));}
+  int marker_id = 0; for (const auto & hypothesis : detection.hypotheses) {const Eigen::Quaterniond orientation(hypothesis.pose.rotation); geometry_msgs::msg::Pose pose; pose.position.x = hypothesis.pose.position.x(); pose.position.y = hypothesis.pose.position.y(); pose.position.z = hypothesis.pose.position.z(); pose.orientation.x = orientation.x(); pose.orientation.y = orientation.y(); pose.orientation.z = orientation.z(); pose.orientation.w = orientation.w(); poses.poses.push_back(pose); markers.markers.push_back(make_marker(poses.header, pose, hypothesis.pose.dims, marker_id++)); concrete_block_world_model_interfaces::msg::Block block; block.pose = pose; block.pose_status = concrete_block_world_model_interfaces::msg::Block::POSE_COARSE; block.task_status = concrete_block_world_model_interfaces::msg::Block::TASK_FREE; block.confidence = static_cast<float>(std::clamp(hypothesis.evidence.score, 0.0, 1.0)); block.observed_faces = static_cast<std::uint8_t>(std::min<std::size_t>(hypothesis.evidence.observed_geometry_faces, 255U)); block.last_seen = cloud_world.header.stamp; result.blocks.push_back(std::move(block));}
   poses_pub_->publish(poses); markers_pub_->publish(markers); return result;
 }
 }  // namespace concrete_block_detector
