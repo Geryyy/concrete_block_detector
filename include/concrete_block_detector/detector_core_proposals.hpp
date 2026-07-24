@@ -104,7 +104,12 @@ inline void patch_in_plane_extents(
   *along_y = span(std::move(y));
 }
 struct CuboidHypothesis {Pose pose; HypothesisEvidence evidence; std::optional<double> proposal_scale_m; double support_height_m{0.0}; std::optional<std::size_t> lineage_index;};
-struct PlaneFitCounts {std::size_t calls{0}, search_points{0}, full_points_scored{0}, trials_evaluated{0}, valid_trials{0};};
+// leftover_points/stop_reason are diagnostic only: recorded strictly after the
+// extraction loop below decides to stop, never consulted by it. stop_reason is
+// one of "ransac_exception", "ransac_below_min_inliers", "max_planes_reached",
+// "remaining_below_min_inliers" (region never had min_inliers points to begin
+// a search), or the sentinel "not_run" if fit_planes itself was never called.
+struct PlaneFitCounts {std::size_t calls{0}, search_points{0}, full_points_scored{0}, trials_evaluated{0}, valid_trials{0}, leftover_points{0}; std::string stop_reason{"not_run"};};
 
 // Direct port of blockpose._canonicalize_pose.  The swapped horizontal
 // dimensions describe the same physical cuboid; rotate its local frame into
@@ -161,8 +166,30 @@ inline std::vector<std::size_t> grid_neighbors(const Points & points,
   return result;
 }
 
-inline std::vector<Points> dbscan_proposals(
-  const Points & input, const DetectionParameters & params, const GroundPlane * ground = nullptr)
+// Diagnostic only: one entry per raw DBSCAN label (label order, before the
+// compat-sort below reorders/truncates them), recording exactly which gate a
+// component failed. gate_passed mirrors dbscan_proposals' own accept/reject
+// decision; accepted_rank/truncated_by_max_components are only meaningful
+// when gate_passed is true, since only gate-passing components are sorted
+// and truncated to proposal_max_components.
+struct ProposalComponentDiagnostics
+{
+  std::size_t dbscan_label{0}, point_count{0};
+  std::array<double, 3> extent{{0.0, 0.0, 0.0}};
+  Point centroid{Point::Zero()};
+  double center_ground_height{0.0};
+  bool size_gate_ok{false}, extent_xy_gate_ok{false}, extent_z_gate_ok{false}, center_z_gate_ok{false}, gate_passed{false};
+  bool truncated_by_max_components{false};
+  std::optional<std::size_t> accepted_rank;
+};
+
+// Pure clustering step of dbscan_proposals below, with none of its gating,
+// sorting or truncation. Extracted so an offline diagnostic probe can inspect
+// a raw (pre-gate, pre-truncation) component's actual points -- the compact
+// ProposalComponentDiagnostics above deliberately omits them to stay cheap
+// for a whole-corpus report -- without duplicating the clustering loop
+// itself. dbscan_proposals calls this directly; behaviour is unchanged.
+inline std::vector<Points> dbscan_label_components(const Points & input, const DetectionParameters & params)
 {
   const Points points = canonical_order(input); const std::size_t count = points.size(); std::vector<int> labels(count, -2); const double radius_sq = params.dbscan_eps * params.dbscan_eps;
   const auto grid = make_spatial_grid(points, params.dbscan_eps);
@@ -171,8 +198,39 @@ inline std::vector<Points> dbscan_proposals(
   for (std::size_t index = 0; index < count; ++index) {if (labels[index] != -2) {continue;} auto seeds = neighbors(index); if (seeds.size() < params.dbscan_min_points) {labels[index] = -1; continue;} labels[index] = label;
     for (std::size_t cursor = 0; cursor < seeds.size(); ++cursor) {const auto candidate = seeds[cursor]; if (labels[candidate] == -1) {labels[candidate] = label;} if (labels[candidate] != -2) {continue;} labels[candidate] = label; const auto adjacent = neighbors(candidate); if (adjacent.size() >= params.dbscan_min_points) {for (const auto next : adjacent) {if (std::find(seeds.begin(), seeds.end(), next) == seeds.end()) {seeds.push_back(next);}}}} ++label;}
   std::vector<Points> components(static_cast<std::size_t>(label)); for (std::size_t i = 0; i < count; ++i) {if (labels[i] >= 0) {components[static_cast<std::size_t>(labels[i])].push_back(points[i]);}}
-  std::vector<Points> accepted; for (auto & proposal : components) {const auto e = extent(proposal); const bool valid = proposal.size() >= params.cluster_min_size && proposal.size() <= params.cluster_max_size && e[0] >= params.cluster_min_extent_xy && e[0] <= params.region_max_extent_xy && e[1] >= params.cluster_min_extent_xy && e[1] <= params.region_max_extent_xy && e[2] >= params.cluster_min_extent_z && e[2] <= params.cluster_max_extent_z; if (!valid) {continue;} const Point actual_center = centroid(proposal); if (ground != nullptr && ground->height(actual_center) > params.cluster_max_center_z) {continue;} accepted.push_back(std::move(proposal));}
-  std::sort(accepted.begin(), accepted.end(), [&params](const Points & a, const Points & b) {if (a.size() != b.size()) {return a.size() > b.size();} const auto ea = extent(a), eb = extent(b); const auto compat = [&params](const std::array<double, 3> & e) {double value = 0.0; for (std::size_t axis = 0; axis < 2U; ++axis) {const double count = std::clamp(std::round(e[axis] / params.block_dims[axis]), 1.0, 8.0); value += std::abs(e[axis] - count * params.block_dims[axis]) / params.block_dims[axis];} const double height_count = std::clamp(std::round(e[2] / params.block_dims[2]), 1.0, 6.0); return value + 0.5 * std::abs(e[2] - height_count * params.block_dims[2]) / params.block_dims[2];}; const double ca = compat(ea), cb = compat(eb); return ca == cb ? canonical_less(centroid(a), centroid(b)) : ca < cb;}); if (accepted.size() > params.proposal_max_components) {accepted.resize(params.proposal_max_components);} return accepted;
+  return components;
+}
+
+inline std::vector<Points> dbscan_proposals(
+  const Points & input, const DetectionParameters & params, const GroundPlane * ground = nullptr,
+  std::vector<ProposalComponentDiagnostics> * diagnostics_out = nullptr)
+{
+  std::vector<Points> components = dbscan_label_components(input, params);
+  if (diagnostics_out != nullptr) {diagnostics_out->clear(); diagnostics_out->reserve(components.size());}
+  std::vector<Points> accepted; std::vector<std::size_t> accepted_labels;
+  for (std::size_t component_label = 0; component_label < components.size(); ++component_label) {
+    auto & proposal = components[component_label]; const auto e = extent(proposal);
+    const bool size_ok = proposal.size() >= params.cluster_min_size && proposal.size() <= params.cluster_max_size;
+    const bool extent_xy_ok = e[0] >= params.cluster_min_extent_xy && e[0] <= params.region_max_extent_xy && e[1] >= params.cluster_min_extent_xy && e[1] <= params.region_max_extent_xy;
+    const bool extent_z_ok = e[2] >= params.cluster_min_extent_z && e[2] <= params.cluster_max_extent_z;
+    const bool valid = size_ok && extent_xy_ok && extent_z_ok;
+    const Point actual_center = centroid(proposal);
+    const double center_height = ground != nullptr ? ground->height(actual_center) : 0.0;
+    const bool center_z_ok = ground == nullptr || center_height <= params.cluster_max_center_z;
+    if (diagnostics_out != nullptr) {
+      ProposalComponentDiagnostics diag; diag.dbscan_label = component_label; diag.point_count = proposal.size(); diag.extent = e; diag.centroid = actual_center; diag.center_ground_height = center_height;
+      diag.size_gate_ok = size_ok; diag.extent_xy_gate_ok = extent_xy_ok; diag.extent_z_gate_ok = extent_z_ok; diag.center_z_gate_ok = center_z_ok; diag.gate_passed = valid && center_z_ok;
+      diagnostics_out->push_back(std::move(diag));
+    }
+    if (!valid) {continue;} if (ground != nullptr && center_height > params.cluster_max_center_z) {continue;}
+    accepted_labels.push_back(component_label); accepted.push_back(std::move(proposal));
+  }
+  std::vector<std::size_t> order(accepted.size()); for (std::size_t i = 0; i < order.size(); ++i) {order[i] = i;}
+  std::sort(order.begin(), order.end(), [&params, &accepted](std::size_t lhs, std::size_t rhs) {const Points & a = accepted[lhs]; const Points & b = accepted[rhs]; if (a.size() != b.size()) {return a.size() > b.size();} const auto ea = extent(a), eb = extent(b); const auto compat = [&params](const std::array<double, 3> & e) {double value = 0.0; for (std::size_t axis = 0; axis < 2U; ++axis) {const double c = std::clamp(std::round(e[axis] / params.block_dims[axis]), 1.0, 8.0); value += std::abs(e[axis] - c * params.block_dims[axis]) / params.block_dims[axis];} const double height_count = std::clamp(std::round(e[2] / params.block_dims[2]), 1.0, 6.0); return value + 0.5 * std::abs(e[2] - height_count * params.block_dims[2]) / params.block_dims[2];}; const double ca = compat(ea), cb = compat(eb); return ca == cb ? canonical_less(centroid(a), centroid(b)) : ca < cb;});
+  std::vector<Points> sorted; sorted.reserve(order.size()); for (const auto i : order) {sorted.push_back(std::move(accepted[i]));}
+  if (diagnostics_out != nullptr) {for (std::size_t rank = 0; rank < order.size(); ++rank) {auto & diag = (*diagnostics_out)[accepted_labels[order[rank]]]; if (rank < params.proposal_max_components) {diag.accepted_rank = rank;} else {diag.truncated_by_max_components = true;}}}
+  if (sorted.size() > params.proposal_max_components) {sorted.resize(params.proposal_max_components);}
+  return sorted;
 }
 
 inline std::vector<PlanePatch> split_plane_patch(const PlanePatch & patch, const DetectionParameters & params)
@@ -186,18 +244,111 @@ inline std::vector<PlanePatch> split_plane_patch(const PlanePatch & patch, const
 
 inline std::pair<std::vector<PlanePatch>, PlaneFitCounts> fit_planes(const Points & region, const DetectionParameters & params)
 {
-  Points remaining = canonical_order(region); std::vector<PlanePatch> output; PlaneFitCounts counts;
-  for (std::size_t index = 0; index < params.max_planes && remaining.size() >= params.min_inliers; ++index) {RansacParameters config; config.distance_threshold = params.ransac_distance; config.num_iterations = params.ransac_iterations; config.seed = params.ransac_seed + index; config.max_search_points = params.ransac_search_max_points; PlaneFitResult fitted; try {fitted = segment_plane(remaining, config);} catch (const std::exception &) {break;} ++counts.calls; counts.search_points += fitted.diagnostics.search_points; counts.full_points_scored += fitted.diagnostics.input_points; counts.trials_evaluated += fitted.diagnostics.trials_evaluated; counts.valid_trials += fitted.diagnostics.valid_trials; if (fitted.inlier_indices.size() < params.min_inliers) {break;} Points inliers; std::vector<bool> retained(remaining.size(), true); for (const auto i : fitted.inlier_indices) {inliers.push_back(remaining[i]); retained[i] = false;} const Point normal = fitted.plane.normal.normalized(), center = centroid(inliers); std::vector<double> residuals; for (const auto & point : inliers) {residuals.push_back((point - center).dot(normal));} const double middle = median(residuals); for (auto & value : residuals) {value = std::abs(value - middle);} const auto split = split_plane_patch({normal, center, inliers, median(std::move(residuals))}, params); output.insert(output.end(), split.begin(), split.end()); Points next; for (std::size_t i = 0; i < remaining.size(); ++i) {if (retained[i]) {next.push_back(remaining[i]);}} remaining = std::move(next);}
+  Points remaining = canonical_order(region); std::vector<PlanePatch> output; PlaneFitCounts counts; std::size_t plane_index = 0;
+  for (; plane_index < params.max_planes && remaining.size() >= params.min_inliers; ++plane_index) {RansacParameters config; config.distance_threshold = params.ransac_distance; config.num_iterations = params.ransac_iterations; config.seed = params.ransac_seed + plane_index; config.max_search_points = params.ransac_search_max_points; PlaneFitResult fitted; try {fitted = segment_plane(remaining, config);} catch (const std::exception &) {counts.stop_reason = "ransac_exception"; break;} ++counts.calls; counts.search_points += fitted.diagnostics.search_points; counts.full_points_scored += fitted.diagnostics.input_points; counts.trials_evaluated += fitted.diagnostics.trials_evaluated; counts.valid_trials += fitted.diagnostics.valid_trials; if (fitted.inlier_indices.size() < params.min_inliers) {counts.stop_reason = "ransac_below_min_inliers"; break;} Points inliers; std::vector<bool> retained(remaining.size(), true); for (const auto i : fitted.inlier_indices) {inliers.push_back(remaining[i]); retained[i] = false;} const Point normal = fitted.plane.normal.normalized(), center = centroid(inliers); std::vector<double> residuals; for (const auto & point : inliers) {residuals.push_back((point - center).dot(normal));} const double middle = median(residuals); for (auto & value : residuals) {value = std::abs(value - middle);} const auto split = split_plane_patch({normal, center, inliers, median(std::move(residuals))}, params); output.insert(output.end(), split.begin(), split.end()); Points next; for (std::size_t i = 0; i < remaining.size(); ++i) {if (retained[i]) {next.push_back(remaining[i]);}} remaining = std::move(next);}
+  // Diagnostic only, below: the loop above already decided why it stopped;
+  // this just names that decision. Natural loop exit (no explicit break above
+  // already set stop_reason) means either max_planes was reached or the
+  // remainder fell under min_inliers before another RANSAC call was tried.
+  counts.leftover_points = remaining.size();
+  if (counts.stop_reason == "not_run") {counts.stop_reason = plane_index >= params.max_planes ? "max_planes_reached" : "remaining_below_min_inliers";}
   return {output, counts};
 }
+
+// Diagnostic only: one entry per accepted proposal component that
+// detect_without_refinement skips entirely -- before fit_planes is ever
+// called on it -- because it is wider than a single block on some axis and
+// split_connected_row could not find observable per-block boundaries to tile
+// it. A component here produced zero plane_region/plane_patch/pairing/
+// raw_lineage entries, for a reason none of those diagnostics can show.
+struct WideProposalSkipDiagnostics
+{
+  std::size_t proposal_component{0}, point_count{0}, region_count{0};
+  std::array<double, 3> extent{{0.0, 0.0, 0.0}};
+};
+// Diagnostic only: per-region summary of the fit_planes call above (why it
+// stopped, how many region points never joined any patch).
+struct PlaneRegionDiagnostics
+{
+  std::size_t proposal_component{0}, region{0}, plane_count{0}, leftover_points{0};
+  std::string stop_reason;
+};
+// Diagnostic only: one entry per patch fit_planes/split_plane_patch produced,
+// independent of whether candidate_plane_sets later classifies it as a
+// top/side candidate at all.
+struct PlanePatchDiagnostics
+{
+  std::size_t proposal_component{0}, region{0}, plane_index{0}, point_count{0};
+  Point normal{Point::UnitZ()}, centroid{Point::Zero()};
+  double residual_mad{0.0};
+};
 
 inline std::vector<std::array<double, 3>> candidate_dims(const DetectionParameters & params)
 { std::vector<std::array<double, 3>> output; const auto configured = params.candidate_dims.empty() ? std::vector<std::array<double, 3>>{params.block_dims} : params.candidate_dims; for (const auto dims : configured) {for (const auto variant : {dims, std::array<double, 3>{{dims[1], dims[0], dims[2]}}}) {if (std::find(output.begin(), output.end(), variant) == output.end()) {output.push_back(variant);}}} return output; }
 
-inline std::vector<std::pair<const PlanePatch *, const PlanePatch *>> candidate_plane_sets(const std::vector<PlanePatch> & planes, const DetectionParameters & params, const GroundPlane & ground, const std::array<double, 3> & dims)
+// Diagnostic only: per-plane top/side classification, and for planes that
+// qualify as a top candidate, every side candidate that was tried and which
+// gate (if any) rejected it. Populated beside decisions candidate_plane_sets
+// already makes below; nothing here feeds `output`.
+struct PairingDiagnostics
 {
-  const Point up = ground.normal.normalized(); const double top_cos = std::cos(params.top_plane_angle_deg * M_PI / 180.0), side_sin = std::sin(params.side_plane_angle_deg * M_PI / 180.0); std::vector<const PlanePatch *> tops, sides; for (const auto & patch : planes) {if (std::abs(patch.normal.dot(up)) > top_cos) {tops.push_back(&patch);} if (std::abs(patch.normal.dot(up)) < side_sin) {sides.push_back(&patch);}} std::sort(tops.begin(), tops.end(), [&up](const auto * a, const auto * b) {return a->centroid.dot(up) > b->centroid.dot(up);}); std::vector<std::pair<const PlanePatch *, const PlanePatch *>> output;
-  for (const auto * top : tops) {const PlanePatch * best = nullptr; double best_score = std::numeric_limits<double>::infinity(), top_height = top->centroid.dot(up); for (const auto * side : sides) {Point n = side->normal - side->normal.dot(up) * up; if (n.norm() < 1e-8) {continue;} n.normalize(); double low = std::numeric_limits<double>::infinity(), high = -low; for (const auto & point : side->points) {const double h = point.dot(up); low = std::min(low, h); high = std::max(high, h);} const double drop = top_height - side->centroid.dot(up); if (drop < .15 || drop > dims[2] - .1 || high < top_height - .15 || low > top_height - .3) {continue;} double gap = std::numeric_limits<double>::infinity(); for (const auto & point : top->points) {gap = std::min(gap, std::abs((point - side->centroid).dot(n)));} const Point tangent = up.cross(n).normalized(); double top_low = std::numeric_limits<double>::infinity(), top_high = -top_low, side_low = std::numeric_limits<double>::infinity(), side_high = -side_low; for (const auto & point : top->points) {const double projection = point.dot(tangent); top_low = std::min(top_low, projection); top_high = std::max(top_high, projection);} for (const auto & point : side->points) {const double projection = point.dot(tangent); side_low = std::min(side_low, projection); side_high = std::max(side_high, projection);} if (std::min(top_high, side_high) - std::max(top_low, side_low) < .15) {continue;} const double score = gap + std::abs(drop - dims[2] / 2.0); if (gap <= .1 && (score < best_score || (score == best_score && best != nullptr && canonical_less(side->centroid, best->centroid)))) {best = side; best_score = score;}} output.emplace_back(top, best);} return output;
+  struct SideAttempt
+  {
+    std::size_t side_plane_index{0};
+    double drop_m{0.0}, gap_m{0.0}, tangential_overlap_m{0.0};
+    bool drop_range_ok{false}, support_band_ok{false}, tangential_overlap_ok{false}, gap_ok{false};
+    bool selected{false};
+  };
+  std::size_t plane_index{0};
+  bool is_top{false}, is_side{false};
+  std::optional<std::size_t> chosen_side_plane_index;
+  std::vector<SideAttempt> side_attempts;
+};
+// Diagnostic only: one candidate_plane_sets() call (one proposal/region/dims
+// combination) worth of PairingDiagnostics, tagged with where it happened.
+struct RegionPairingDiagnostics
+{
+  std::size_t proposal_component{0}, region{0}, dims_index{0};
+  std::vector<PairingDiagnostics> planes;
+};
+
+inline std::vector<std::pair<const PlanePatch *, const PlanePatch *>> candidate_plane_sets(
+  const std::vector<PlanePatch> & planes, const DetectionParameters & params, const GroundPlane & ground,
+  const std::array<double, 3> & dims, std::vector<PairingDiagnostics> * diagnostics_out = nullptr)
+{
+  const Point up = ground.normal.normalized(); const double top_cos = std::cos(params.top_plane_angle_deg * M_PI / 180.0), side_sin = std::sin(params.side_plane_angle_deg * M_PI / 180.0); std::vector<const PlanePatch *> tops, sides;
+  if (diagnostics_out != nullptr) {diagnostics_out->clear(); diagnostics_out->resize(planes.size());}
+  for (std::size_t plane_index = 0; plane_index < planes.size(); ++plane_index) {const auto & patch = planes[plane_index]; const bool is_top = std::abs(patch.normal.dot(up)) > top_cos; const bool is_side = std::abs(patch.normal.dot(up)) < side_sin; if (is_top) {tops.push_back(&patch);} if (is_side) {sides.push_back(&patch);} if (diagnostics_out != nullptr) {(*diagnostics_out)[plane_index].plane_index = plane_index; (*diagnostics_out)[plane_index].is_top = is_top; (*diagnostics_out)[plane_index].is_side = is_side;}}
+  std::sort(tops.begin(), tops.end(), [&up](const auto * a, const auto * b) {return a->centroid.dot(up) > b->centroid.dot(up);}); std::vector<std::pair<const PlanePatch *, const PlanePatch *>> output;
+  for (const auto * top : tops) {
+    const PlanePatch * best = nullptr; double best_score = std::numeric_limits<double>::infinity(), top_height = top->centroid.dot(up);
+    const std::size_t top_index = static_cast<std::size_t>(top - planes.data());
+    for (const auto * side : sides) {
+      Point n = side->normal - side->normal.dot(up) * up; if (n.norm() < 1e-8) {continue;} n.normalize();
+      double low = std::numeric_limits<double>::infinity(), high = -low; for (const auto & point : side->points) {const double h = point.dot(up); low = std::min(low, h); high = std::max(high, h);}
+      const double drop = top_height - side->centroid.dot(up);
+      const bool drop_range_ok = !(drop < .15 || drop > dims[2] - .1), support_band_ok = !(high < top_height - .15 || low > top_height - .3);
+      if (!drop_range_ok || !support_band_ok) {
+        if (diagnostics_out != nullptr) {const std::size_t side_index = static_cast<std::size_t>(side - planes.data()); (*diagnostics_out)[top_index].side_attempts.push_back({side_index, drop, 0.0, 0.0, drop_range_ok, support_band_ok, false, false, false});}
+        continue;
+      }
+      double gap = std::numeric_limits<double>::infinity(); for (const auto & point : top->points) {gap = std::min(gap, std::abs((point - side->centroid).dot(n)));}
+      const Point tangent = up.cross(n).normalized(); double top_low = std::numeric_limits<double>::infinity(), top_high = -top_low, side_low = std::numeric_limits<double>::infinity(), side_high = -side_low;
+      for (const auto & point : top->points) {const double projection = point.dot(tangent); top_low = std::min(top_low, projection); top_high = std::max(top_high, projection);}
+      for (const auto & point : side->points) {const double projection = point.dot(tangent); side_low = std::min(side_low, projection); side_high = std::max(side_high, projection);}
+      const double overlap = std::min(top_high, side_high) - std::max(top_low, side_low); const bool overlap_ok = overlap >= .15;
+      if (!overlap_ok) {
+        if (diagnostics_out != nullptr) {const std::size_t side_index = static_cast<std::size_t>(side - planes.data()); (*diagnostics_out)[top_index].side_attempts.push_back({side_index, drop, gap, overlap, drop_range_ok, support_band_ok, false, false, false});}
+        continue;
+      }
+      const double score = gap + std::abs(drop - dims[2] / 2.0); const bool gap_ok = gap <= .1;
+      if (diagnostics_out != nullptr) {const std::size_t side_index = static_cast<std::size_t>(side - planes.data()); (*diagnostics_out)[top_index].side_attempts.push_back({side_index, drop, gap, overlap, drop_range_ok, support_band_ok, overlap_ok, gap_ok, false});}
+      if (gap_ok && (score < best_score || (score == best_score && best != nullptr && canonical_less(side->centroid, best->centroid)))) {best = side; best_score = score;}
+    }
+    if (diagnostics_out != nullptr && best != nullptr) {const std::size_t best_side_index = static_cast<std::size_t>(best - planes.data()); (*diagnostics_out)[top_index].chosen_side_plane_index = best_side_index; for (auto & attempt : (*diagnostics_out)[top_index].side_attempts) {if (attempt.side_plane_index == best_side_index) {attempt.selected = true;}}}
+    output.emplace_back(top, best);
+  }
+  return output;
 }
 
 // The top-only fallback yaw is the dominant axis of the WORLD-XY footprint,

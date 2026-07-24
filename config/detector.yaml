@@ -27,7 +27,16 @@ concrete_block_detector:
       cluster_min_size: 30
       cluster_max_size: 50000
       cluster_min_extent_xy: 0.3
-      cluster_max_extent_xy: 1.5
+      # A component wider than this is dropped whole when split_connected_row
+      # cannot tile it, before any plane is fitted. That splitter looks for a
+      # density valley at the seam, which blocks that physically abut do not
+      # have (measured: valley 42 against a required 25.2 on noise-free
+      # synthetic data), so stacked and touching blocks were discarded rather
+      # than fitted. 2.2 m admits a two-block row; region_max_extent_xy still
+      # caps the component at 3.0 m. Measured over the 23 annotated snapshots:
+      # matched 41 -> 45, recall 0.672 -> 0.738, false positives unchanged at 8.
+      # The C++ default stays 1.5 so the Python parity fixtures are unaffected.
+      cluster_max_extent_xy: 2.2
       region_max_extent_xy: 3.0
       cluster_min_extent_z: 0.3
       cluster_max_extent_z: 3.5

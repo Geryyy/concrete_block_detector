@@ -17,7 +17,18 @@ struct PipelineCounts
   std::size_t plane_trials_evaluated{0}, plane_valid_trials{0};
   std::size_t raw_hypotheses{0}, refinement_candidates{0}, selected_hypotheses{0};
 };
-struct DetectionResult {std::vector<Pose> poses; std::vector<CuboidHypothesis> hypotheses; PipelineCounts counts; LocalGroundModel ground; Points above_support_points; std::vector<RawHypothesisLineage> raw_lineage;};
+struct DetectionResult {
+  std::vector<Pose> poses; std::vector<CuboidHypothesis> hypotheses; PipelineCounts counts;
+  LocalGroundModel ground; Points above_support_points; std::vector<RawHypothesisLineage> raw_lineage;
+  // Diagnostic only, populated below alongside raw_lineage and consumed by
+  // nothing downstream of detect_without_refinement -- see the struct
+  // comments in detector_core_proposals.hpp for what each field means.
+  std::vector<ProposalComponentDiagnostics> proposal_diagnostics;
+  std::vector<WideProposalSkipDiagnostics> wide_proposal_skips;
+  std::vector<PlaneRegionDiagnostics> plane_region_diagnostics;
+  std::vector<PlanePatchDiagnostics> plane_patch_diagnostics;
+  std::vector<RegionPairingDiagnostics> pairing_diagnostics;
+};
 
 // Open3D tensor voxel downsampling averages every point in a floor-indexed
 // voxel.  Canonical sort makes the C++ result independent of input ordering.
@@ -96,7 +107,7 @@ inline DetectionResult detect_without_refinement(
       proposal_seed.push_back(point);
     }
   }
-  const auto proposals = dbscan_proposals(proposal_seed, params, &result.ground);
+  const auto proposals = dbscan_proposals(proposal_seed, params, &result.ground, &result.proposal_diagnostics);
   result.counts.proposal_components = proposals.size();
   std::vector<CuboidHypothesis> raw;
   for (std::size_t proposal_index = 0; proposal_index < proposals.size(); ++proposal_index) {
@@ -110,14 +121,28 @@ inline DetectionResult detect_without_refinement(
       (proposal_extent[0] > params.cluster_max_extent_xy ||
       proposal_extent[1] > params.cluster_max_extent_xy))
     {
+      // Diagnostic only: this component never reaches fit_planes below, so
+      // it would otherwise leave zero trace in any other diagnostic here.
+      WideProposalSkipDiagnostics skip; skip.proposal_component = proposal_index; skip.point_count = proposal.size(); skip.region_count = regions.size(); skip.extent = proposal_extent;
+      result.wide_proposal_skips.push_back(std::move(skip));
       continue;
     }
     for (std::size_t region_index = 0; region_index < regions.size(); ++region_index) {
       const auto & region = regions[region_index];
       ++result.counts.plane_regions; const auto [planes, counts] = fit_planes(region, params);
       result.counts.plane_fit_calls += counts.calls; result.counts.plane_search_points += counts.search_points; result.counts.plane_full_points_scored += counts.full_points_scored; result.counts.plane_trials_evaluated += counts.trials_evaluated; result.counts.plane_valid_trials += counts.valid_trials;
+      // Diagnostic only, these two blocks: fit_planes/the patches it returned
+      // are unchanged above; this just records what they were for the stages
+      // before hypothesis synthesis (RawHypothesisLineage starts too late to
+      // see a component/region that never produced a raw hypothesis at all).
+      {PlaneRegionDiagnostics region_diag; region_diag.proposal_component = proposal_index; region_diag.region = region_index; region_diag.plane_count = planes.size(); region_diag.leftover_points = counts.leftover_points; region_diag.stop_reason = counts.stop_reason; result.plane_region_diagnostics.push_back(std::move(region_diag));}
+      for (std::size_t plane_index = 0; plane_index < planes.size(); ++plane_index) {const auto & patch = planes[plane_index]; PlanePatchDiagnostics patch_diag; patch_diag.proposal_component = proposal_index; patch_diag.region = region_index; patch_diag.plane_index = plane_index; patch_diag.point_count = patch.points.size(); patch_diag.normal = patch.normal; patch_diag.centroid = patch.centroid; patch_diag.residual_mad = patch.residual_mad; result.plane_patch_diagnostics.push_back(std::move(patch_diag));}
       const auto dims_values = candidate_dims(params);
-      for (std::size_t dims_index = 0; dims_index < dims_values.size(); ++dims_index) {const auto & dims = dims_values[dims_index]; for (const auto & pair : candidate_plane_sets(planes, params, result.ground, dims)) {
+      for (std::size_t dims_index = 0; dims_index < dims_values.size(); ++dims_index) {const auto & dims = dims_values[dims_index];
+      RegionPairingDiagnostics region_pairing; region_pairing.proposal_component = proposal_index; region_pairing.region = region_index; region_pairing.dims_index = dims_index;
+      const auto pairs = candidate_plane_sets(planes, params, result.ground, dims, &region_pairing.planes);
+      result.pairing_diagnostics.push_back(std::move(region_pairing));
+      for (const auto & pair : pairs) {
         Points local_support = region;
         if (pair.second != nullptr) {local_support = pair.first->points; local_support.insert(local_support.end(), pair.second->points.begin(), pair.second->points.end());}
         const auto pose = canonicalize_pose(synthesize_pose(*pair.first, pair.second, local_support, dims)); const std::size_t support = pair.first->points.size() + (pair.second == nullptr ? 0U : pair.second->points.size()); auto hypothesis = make_hypothesis(pose, support, result.ground, pair.second == nullptr ? 1U : 2U, sensor_context);

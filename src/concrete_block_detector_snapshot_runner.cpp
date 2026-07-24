@@ -292,6 +292,79 @@ json counts_json(const detector_core::PipelineCounts & counts)
   return {{"input_points", counts.input_points}, {"downsampled_points", counts.downsampled_points}, {"above_support_points", counts.above_support_points}, {"proposal_components", counts.proposal_components}, {"plane_regions", counts.plane_regions}, {"plane_fit_calls", counts.plane_fit_calls}, {"plane_search_points", counts.plane_search_points}, {"plane_full_points_scored", counts.plane_full_points_scored}, {"plane_trials_evaluated", counts.plane_trials_evaluated}, {"plane_valid_trials", counts.plane_valid_trials}, {"raw_hypotheses", counts.raw_hypotheses}, {"refinement_candidates", counts.refinement_candidates}, {"selected_hypotheses", counts.selected_hypotheses}};
 }
 
+// Diagnostic-only stages before hypothesis synthesis (see the struct
+// comments in detector_core_proposals.hpp). raw_lineage above only ever sees
+// a (proposal, region, dims, top, side) combination that made it as far as
+// synthesize_pose -- these four cover the funnel from raw DBSCAN labels down
+// to that point, so a target that never produced any raw_lineage entry is
+// still explainable from this JSON alone.
+json proposal_diagnostics_json(const detector_core::ProposalComponentDiagnostics & diag)
+{
+  return {
+    {"dbscan_label", diag.dbscan_label}, {"point_count", diag.point_count},
+    {"extent", diag.extent}, {"centroid", {diag.centroid.x(), diag.centroid.y(), diag.centroid.z()}},
+    {"center_ground_height_m", diag.center_ground_height},
+    {"size_gate_ok", diag.size_gate_ok}, {"extent_xy_gate_ok", diag.extent_xy_gate_ok},
+    {"extent_z_gate_ok", diag.extent_z_gate_ok}, {"center_z_gate_ok", diag.center_z_gate_ok},
+    {"gate_passed", diag.gate_passed}, {"truncated_by_max_components", diag.truncated_by_max_components},
+    {"accepted_rank", diag.accepted_rank ? json(*diag.accepted_rank) : json(nullptr)},
+  };
+}
+
+json wide_proposal_skip_json(const detector_core::WideProposalSkipDiagnostics & diag)
+{
+  return {
+    {"proposal_component", diag.proposal_component}, {"point_count", diag.point_count},
+    {"region_count", diag.region_count}, {"extent", diag.extent},
+  };
+}
+
+json plane_region_diagnostics_json(const detector_core::PlaneRegionDiagnostics & diag)
+{
+  return {
+    {"proposal_component", diag.proposal_component}, {"region", diag.region},
+    {"plane_count", diag.plane_count}, {"leftover_points", diag.leftover_points},
+    {"stop_reason", diag.stop_reason},
+  };
+}
+
+json plane_patch_diagnostics_json(const detector_core::PlanePatchDiagnostics & diag)
+{
+  return {
+    {"proposal_component", diag.proposal_component}, {"region", diag.region}, {"plane_index", diag.plane_index},
+    {"point_count", diag.point_count},
+    {"normal", {diag.normal.x(), diag.normal.y(), diag.normal.z()}},
+    {"centroid", {diag.centroid.x(), diag.centroid.y(), diag.centroid.z()}},
+    {"residual_mad", diag.residual_mad},
+  };
+}
+
+json pairing_diagnostics_json(const detector_core::RegionPairingDiagnostics & diag)
+{
+  json planes = json::array();
+  for (const auto & plane : diag.planes) {
+    json attempts = json::array();
+    for (const auto & attempt : plane.side_attempts) {
+      attempts.push_back({
+        {"side_plane_index", attempt.side_plane_index},
+        {"drop_m", attempt.drop_m}, {"gap_m", attempt.gap_m}, {"tangential_overlap_m", attempt.tangential_overlap_m},
+        {"drop_range_ok", attempt.drop_range_ok}, {"support_band_ok", attempt.support_band_ok},
+        {"tangential_overlap_ok", attempt.tangential_overlap_ok}, {"gap_ok", attempt.gap_ok},
+        {"selected", attempt.selected},
+      });
+    }
+    planes.push_back({
+      {"plane_index", plane.plane_index}, {"is_top", plane.is_top}, {"is_side", plane.is_side},
+      {"chosen_side_plane_index", plane.chosen_side_plane_index ? json(*plane.chosen_side_plane_index) : json(nullptr)},
+      {"side_attempts", attempts},
+    });
+  }
+  return {
+    {"proposal_component", diag.proposal_component}, {"region", diag.region}, {"dims_index", diag.dims_index},
+    {"planes", planes},
+  };
+}
+
 json run_snapshot(const std::filesystem::path & snapshot, const RuntimeParameters & runtime)
 {
   const Points sensor_points = load_ascii_xyz_pcd(snapshot / "cloud.pcd");
@@ -310,6 +383,16 @@ json run_snapshot(const std::filesystem::path & snapshot, const RuntimeParameter
   for (const auto & hypothesis : detection.hypotheses) {poses.push_back(pose_json(hypothesis));}
   json raw_lineage = json::array();
   for (const auto & lineage : detection.raw_lineage) {raw_lineage.push_back(raw_lineage_json(lineage));}
+  json proposal_diagnostics = json::array();
+  for (const auto & diag : detection.proposal_diagnostics) {proposal_diagnostics.push_back(proposal_diagnostics_json(diag));}
+  json wide_proposal_skips = json::array();
+  for (const auto & diag : detection.wide_proposal_skips) {wide_proposal_skips.push_back(wide_proposal_skip_json(diag));}
+  json plane_region_diagnostics = json::array();
+  for (const auto & diag : detection.plane_region_diagnostics) {plane_region_diagnostics.push_back(plane_region_diagnostics_json(diag));}
+  json plane_patch_diagnostics = json::array();
+  for (const auto & diag : detection.plane_patch_diagnostics) {plane_patch_diagnostics.push_back(plane_patch_diagnostics_json(diag));}
+  json pairing_diagnostics = json::array();
+  for (const auto & diag : detection.pairing_diagnostics) {pairing_diagnostics.push_back(pairing_diagnostics_json(diag));}
   return {
     {"snapshot", snapshot.filename().string()},
     {"snapshot_path", snapshot.string()},
@@ -325,6 +408,11 @@ json run_snapshot(const std::filesystem::path & snapshot, const RuntimeParameter
     {"runtime_ms", elapsed},
     {"counts", counts_json(detection.counts)},
     {"poses", poses}, {"raw_lineage", raw_lineage},
+    {"proposal_diagnostics", proposal_diagnostics},
+    {"wide_proposal_skips", wide_proposal_skips},
+    {"plane_region_diagnostics", plane_region_diagnostics},
+    {"plane_patch_diagnostics", plane_patch_diagnostics},
+    {"pairing_diagnostics", pairing_diagnostics},
   };
 }
 }  // namespace
