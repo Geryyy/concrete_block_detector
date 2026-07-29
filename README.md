@@ -16,7 +16,7 @@ dimensions **0.9 × 0.6 × 0.6 m**.
 ros2 launch concrete_block_detector concrete_block_detector.launch.py
 ```
 
-That standalone launch uses the raw `PointCloud2` transport. It caches valid
+That standalone launch defaults to the Cloudini transport. It caches valid
 clouds until an explicit `~/discover_blocks` request.
 
 For the wall-assembly pipeline, launch the detector with the persistent world
@@ -34,7 +34,9 @@ Interfaces, relative to the `concrete_block_detector` node:
 - Serve: `~/discover_blocks` (`DiscoverBlocks`) — one detection pass over the latest valid cloud
 
 The detector does not own IDs or world state. Its cloud callback only caches a
-valid world-frame cloud; `~/discover_blocks` returns anonymous coarse poses.
+valid world-frame cloud; `~/discover_blocks` returns anonymous fitted poses.
+Top-only hypotheses are marked coarse; top-and-side hypotheses are marked
+precise with conservative detector covariance.
 `world_model_node` owns association, IDs, and the single atomic world update.
 
 ## Offline snapshot runner
@@ -91,5 +93,5 @@ It does not start a `cloudini_topic_converter` bridge node. This requires the
 
 The node ignores clouds without a valid TF transform to `world` at their input
 timestamp. An explicit discovery with no detections publishes an empty pose
-array and `DELETEALL` marker. It supplies coarse poses only: it does not
-register/refine poses, infer missing blocks, or update world-model state.
+array and `DELETEALL` marker. It fits cuboid poses from the cloud but does not
+infer missing blocks or update world-model state.
