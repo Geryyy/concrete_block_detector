@@ -64,6 +64,26 @@ distant structures that otherwise resemble partial block faces. Disable it for
 a new, uncalibrated workcell or replace `min_m`/`max_m` with that workcell's
 world-frame envelope.
 
+### Reviewed-snapshot regression score
+
+`tools/reviewed_snapshot_manifest.json` contains the 23 reviewed annotation
+ROIs and 61 target poses/dimensions. It intentionally contains no point clouds:
+the snapshot directories remain external runner inputs. Generate runner JSON
+with one `--snapshot <snapshots-dir>/<snapshot-name>` argument per manifest
+entry, then score it without Blockpose modules or third-party Python packages:
+
+```bash
+python3 tools/score_snapshot_runner.py /tmp/snapshot_runner.json
+python3 tools/test_score_snapshot_runner.py
+```
+
+The scorer admits a prediction only when its center lies in that snapshot's
+reviewed ROI, then performs maximum-cardinality one-to-one assignment to
+reviewed targets using a fixed 0.50 m center-distance compatibility threshold.
+It reports actual precision, recall, and counts; it deliberately has no
+hard-coded baseline expectation because those metrics are regression evidence,
+not an acceptance threshold.
+
 The wall-assembly launch uses Cloudini's `point_cloud_transport` plugin, so
 the detector subscribes to `/seyond/points/cloudini` and decodes it in-process.
 It does not start a `cloudini_topic_converter` bridge node. This requires the
