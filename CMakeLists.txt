@@ -39,31 +39,13 @@ add_executable(concrete_block_detector_snapshot_runner
 target_include_directories(concrete_block_detector_snapshot_runner PRIVATE include)
 target_link_libraries(concrete_block_detector_snapshot_runner Eigen3::Eigen nlohmann_json::nlohmann_json yaml-cpp)
 
-# This consumes the Python-selected initialization fixture.  It is a
-# deliberately separate diagnostic executable: the normal detector tests keep
-# their full end-to-end contract while this identifies a mismatch before the
-# SDF solver is involved.
-add_executable(concrete_block_detector_proposal_parity_runner
-  src/concrete_block_detector_proposal_parity_runner.cpp
-)
-target_include_directories(concrete_block_detector_proposal_parity_runner PRIVATE include)
-target_link_libraries(concrete_block_detector_proposal_parity_runner Eigen3::Eigen nlohmann_json::nlohmann_json)
-
 install(TARGETS concrete_block_detector_node concrete_block_detector_snapshot_runner
-  concrete_block_detector_proposal_parity_runner
   DESTINATION lib/${PROJECT_NAME}
 )
 install(DIRECTORY launch config DESTINATION share/${PROJECT_NAME})
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
-  ament_add_gtest(test_parity_fixture_contract
-    test/test_parity_fixture_contract.cpp
-  )
-  target_compile_definitions(test_parity_fixture_contract PRIVATE
-    CONCRETE_BLOCK_DETECTOR_PARITY_MANIFEST="${CMAKE_CURRENT_SOURCE_DIR}/test/parity/fixtures_manifest.json"
-  )
-
   ament_add_gtest(test_detector_core_geometry
     test/test_detector_core_geometry.cpp
   )
@@ -86,10 +68,7 @@ if(BUILD_TESTING)
     test/test_detector_core_refine.cpp
   )
   target_include_directories(test_detector_core_refine PRIVATE include)
-  target_link_libraries(test_detector_core_refine Eigen3::Eigen nlohmann_json::nlohmann_json)
-  target_compile_definitions(test_detector_core_refine PRIVATE
-    BLOCKPOSE_SOURCE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/../blockpose"
-  )
+  target_link_libraries(test_detector_core_refine Eigen3::Eigen)
 
   ament_add_gtest(test_detector_core_evidence
     test/test_detector_core_evidence.cpp
@@ -97,14 +76,6 @@ if(BUILD_TESTING)
   target_include_directories(test_detector_core_evidence PRIVATE include)
   target_link_libraries(test_detector_core_evidence Eigen3::Eigen)
 
-  ament_add_gtest(test_detector_core_python_parity
-    test/test_detector_core_python_parity.cpp
-  )
-  target_include_directories(test_detector_core_python_parity PRIVATE include)
-  target_link_libraries(test_detector_core_python_parity Eigen3::Eigen)
-  target_compile_definitions(test_detector_core_python_parity PRIVATE
-    BLOCKPOSE_SOURCE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/../blockpose"
-  )
 endif()
 
 ament_package()

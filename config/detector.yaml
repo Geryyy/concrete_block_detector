@@ -35,7 +35,6 @@ concrete_block_detector:
       # than fitted. 2.2 m admits a two-block row; region_max_extent_xy still
       # caps the component at 3.0 m. Measured over the 23 annotated snapshots:
       # matched 41 -> 45, recall 0.672 -> 0.738, false positives unchanged at 8.
-      # The C++ default stays 1.5 so the Python parity fixtures are unaffected.
       cluster_max_extent_xy: 2.2
       region_max_extent_xy: 3.0
       cluster_min_extent_z: 0.3

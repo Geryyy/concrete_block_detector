@@ -113,32 +113,12 @@ inline double huber_cost(double r, double scale)
 {
   const double a = std::abs(r); return a <= scale ? 0.5 * r * r : scale * (a - 0.5 * scale);
 }
-// The exact scalar objective used by refine_pose.  It is deliberately public
-// so parity tests can evaluate a Python correction in the C++ residual model;
-// this helper does not participate in the optimizer itself.
-inline double refinement_huber_objective(
-  const CuboidPose & initial,
-  const Points & points,
-  const Eigen::Matrix<double, 6, 1> & correction,
-  double huber_scale)
-{
-  const Point half(initial.dims[0] / 2.0, initial.dims[1] / 2.0, initial.dims[2] / 2.0);
-  const Eigen::Matrix3d rotation = initial.rotation * exp_so3(correction.head<3>());
-  double total = 0.0;
-  for (const auto & point : points) {
-    const double residual = box_sdf(
-      rotation.transpose() * (point - (initial.position + correction.tail<3>())), half);
-    total += huber_cost(residual, huber_scale);
-  }
-  return total;
-}
 inline double rotation_angle_deg(const Eigen::Matrix3d & r)
 {
   return std::acos(std::clamp((r.trace() - 1.0) / 2.0, -1.0, 1.0)) * 57.2957795130823208768;
 }
-// Facts captured before the correction safety guard.  Keeping them with the
-// result makes Python/C++ optimizer parity observable without changing the
-// published pose or the refinement decision.
+// Facts captured before the correction safety guard for diagnostics without
+// changing the published pose or refinement decision.
 struct RefineDiagnostics
 {
   bool attempted{false};

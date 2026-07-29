@@ -34,8 +34,8 @@ struct PlanePatch {Point normal{Point::UnitZ()}; Point centroid{Point::Zero()}; 
 struct Pose {Point position{Point::Zero()}; Eigen::Matrix3d rotation{Eigen::Matrix3d::Identity()}; std::array<double, 3> dims{{0.9, 0.6, 0.6}}; double confidence{1.0};};
 struct HypothesisEvidence {std::size_t support_points{0}; double top_height_error_m{0.0}, score{0.0}; std::size_t expected_visible_faces{0}, covered_visible_faces{0}, free_space_violations{0}, supported_rays{0}, observed_geometry_faces{0}, incident_rays{0};};
 // A provenance record is deliberately kept separate from the numerical
-// hypothesis.  It makes a Python/C++ pre-refinement disagreement inspectable
-// without changing any score, threshold, or selection behaviour.
+// hypothesis, making pre-refinement decisions inspectable without changing
+// any score, threshold, or selection behaviour.
 struct RawHypothesisLineage
 {
   std::string id;
