@@ -12,8 +12,8 @@ concrete_block_detector:
       min_m: [-15.0, 2.0, 0.0]
       max_m: [-10.0, 3.5, 1.5]
 
-    # Mirrors blockpose.DetectionParams. Candidate dimensions are flattened
-    # triples; an empty list means the canonical block dimensions only.
+    # Candidate dimensions are flattened triples; an empty list means the
+    # canonical block dimensions only.
     detector:
       voxel_size: 0.04
       ground_thickness: 0.15
@@ -33,8 +33,8 @@ concrete_block_detector:
       # have (measured: valley 42 against a required 25.2 on noise-free
       # synthetic data), so stacked and touching blocks were discarded rather
       # than fitted. 2.2 m admits a two-block row; region_max_extent_xy still
-      # caps the component at 3.0 m. Measured over the 23 annotated snapshots:
-      # matched 41 -> 45, recall 0.672 -> 0.738, false positives unchanged at 8.
+      # caps the component at 3.0 m. Pose-quality results are recorded in
+      # tools/reviewed_snapshot_baseline.json, not inferred from this setting.
       cluster_max_extent_xy: 2.2
       region_max_extent_xy: 3.0
       cluster_min_extent_z: 0.3

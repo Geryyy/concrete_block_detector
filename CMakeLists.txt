@@ -46,35 +46,15 @@ install(DIRECTORY launch config DESTINATION share/${PROJECT_NAME})
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
-  ament_add_gtest(test_detector_core_geometry
-    test/test_detector_core_geometry.cpp
-  )
-  target_include_directories(test_detector_core_geometry PRIVATE include)
-  target_link_libraries(test_detector_core_geometry Eigen3::Eigen)
+  function(add_detector_core_test name)
+    ament_add_gtest(${name} test/${name}.cpp)
+    target_include_directories(${name} PRIVATE include)
+    target_link_libraries(${name} Eigen3::Eigen)
+  endfunction()
 
-  ament_add_gtest(test_detector_core_proposals
-    test/test_detector_core_proposals.cpp
-  )
-  target_include_directories(test_detector_core_proposals PRIVATE include)
-  target_link_libraries(test_detector_core_proposals Eigen3::Eigen)
-
-  ament_add_gtest(test_detector_core_pipeline
-    test/test_detector_core_pipeline.cpp
-  )
-  target_include_directories(test_detector_core_pipeline PRIVATE include)
-  target_link_libraries(test_detector_core_pipeline Eigen3::Eigen)
-
-  ament_add_gtest(test_detector_core_refine
-    test/test_detector_core_refine.cpp
-  )
-  target_include_directories(test_detector_core_refine PRIVATE include)
-  target_link_libraries(test_detector_core_refine Eigen3::Eigen)
-
-  ament_add_gtest(test_detector_core_evidence
-    test/test_detector_core_evidence.cpp
-  )
-  target_include_directories(test_detector_core_evidence PRIVATE include)
-  target_link_libraries(test_detector_core_evidence Eigen3::Eigen)
+  foreach(name geometry proposals pipeline refine evidence)
+    add_detector_core_test(test_detector_core_${name})
+  endforeach()
 
 endif()
 

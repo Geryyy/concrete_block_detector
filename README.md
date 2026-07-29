@@ -81,10 +81,10 @@ python3 tools/test_score_snapshot_runner.py
 
 The scorer admits a prediction only when its center lies in that snapshot's
 reviewed ROI, then performs maximum-cardinality one-to-one assignment to
-reviewed targets using a fixed 0.50 m center-distance compatibility threshold.
-It reports actual precision, recall, and counts; it deliberately has no
-hard-coded baseline expectation because those metrics are regression evidence,
-not an acceptance threshold.
+reviewed targets using fixed center, dimension, and symmetry-aware orientation
+thresholds. `tools/reviewed_snapshot_baseline.json` records the reproducible
+reference result and hashes of the external inputs. It is evidence for changes,
+not an accuracy promise for another workcell or bag.
 
 The wall-assembly launch uses Cloudini's `point_cloud_transport` plugin, so
 the detector subscribes to `/seyond/points/cloudini` and decodes it in-process.

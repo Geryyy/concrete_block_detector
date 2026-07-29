@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <map>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -36,19 +37,36 @@ struct GroundPlane
 struct LocalGroundModel : public GroundPlane
 {
   double cell_size{0.5};
-  std::vector<Eigen::Vector2d> cell_xy;
-  std::vector<double> cell_z;
+  std::map<std::pair<long long, long long>, double> cell_z;
   [[nodiscard]] double support_z(const Point & p) const
   {
     const double planar = GroundPlane::support_z(p);
-    if (cell_xy.empty()) {return planar;}
-    std::size_t nearest = 0; double distance_sq = std::numeric_limits<double>::infinity();
-    for (std::size_t i = 0; i < cell_xy.size(); ++i) {
-      const double candidate = (p.head<2>() - cell_xy[i]).squaredNorm();
-      if (candidate < distance_sq) {distance_sq = candidate; nearest = i;}
+    if (cell_z.empty()) {return planar;}
+    const auto x = static_cast<long long>(std::floor(p.x() / cell_size));
+    const auto y = static_cast<long long>(std::floor(p.y() / cell_size));
+    const double max_distance_sq = std::pow(cell_size * 1.75, 2.0);
+    const double not_found = std::numeric_limits<double>::infinity();
+    double nearest_distance_sq = not_found;
+    double nearest_z = planar;
+    Point nearest_center = Point::Zero();
+    // A support cell can be at most two cell indices away while remaining
+    // within the 1.75-cell radius. This preserves the former nearest-cell
+    // semantics without scanning every local-ground cell for every point.
+    for (long long cell_x = x - 2; cell_x <= x + 2; ++cell_x) {
+      for (long long cell_y = y - 2; cell_y <= y + 2; ++cell_y) {
+        const auto candidate = cell_z.find({cell_x, cell_y});
+        if (candidate == cell_z.end()) {continue;}
+        const Point center((cell_x + .5) * cell_size, (cell_y + .5) * cell_size, 0.0);
+        const double distance_sq = (p.head<2>() - center.head<2>()).squaredNorm();
+        if (distance_sq < nearest_distance_sq) {
+          nearest_distance_sq = distance_sq;
+          nearest_z = candidate->second;
+          nearest_center = center;
+        }
+      }
     }
-    if (std::sqrt(distance_sq) > cell_size * 1.75) {return planar;}
-    return planar + cell_z[nearest] - GroundPlane::support_z(Point(cell_xy[nearest].x(), cell_xy[nearest].y(), 0.0));
+    if (nearest_distance_sq > max_distance_sq) {return planar;}
+    return planar + nearest_z - GroundPlane::support_z(nearest_center);
   }
   [[nodiscard]] double height(const Point & p) const {return p.z() - support_z(p);}
 };
@@ -148,7 +166,7 @@ inline LocalGroundModel make_local_ground_model(const Points & points, const Gro
   for (std::size_t begin = 0; begin < samples.size();) {
     std::size_t end = begin + 1U; while (end < samples.size() && samples[end].x == samples[begin].x && samples[end].y == samples[begin].y) {++end;}
     if (end - begin >= 3U) {std::vector<double> residuals; for (std::size_t i = begin; i < end; ++i) {residuals.push_back(samples[i].point.z() - plane.support_z(samples[i].point));}
-      const double low = percentile_linear(residuals, 10.0); if (low <= params.thickness) {const Eigen::Vector2d center((samples[begin].x + 0.5) * params.local_cell_size, (samples[begin].y + 0.5) * params.local_cell_size); local.cell_xy.push_back(center); local.cell_z.push_back(plane.support_z(Point(center.x(), center.y(), 0.0)) + low);}}
+      const double low = percentile_linear(residuals, 10.0); if (low <= params.thickness) {const Point center((samples[begin].x + .5) * params.local_cell_size, (samples[begin].y + .5) * params.local_cell_size, 0.0); local.cell_z.emplace(std::make_pair(samples[begin].x, samples[begin].y), plane.support_z(center) + low);}}
     begin = end;
   }
   return local;

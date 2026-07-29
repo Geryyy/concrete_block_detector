@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "purpose": "Reproducible reference result for the reviewed-snapshot pose-quality scorer.",
+  "detector_revision": "1dd50c2e85f31150d32d1963e38afaf39195f710",
+  "parameter_files": [
+    "config/detector.yaml",
+    "../concrete_block_perception/config/grip_at_top_detector_scene_discovery.yaml"
+  ],
+  "parameter_file_sha256": {
+    "config/detector.yaml": "f7b8204825b599ba45950b7c4d3055b46fc65db6ccfa1991c6f8165953167bba",
+    "../concrete_block_perception/config/grip_at_top_detector_scene_discovery.yaml": "17b00563766705c909111b67538f3a5de024d76b9d2cf60656e157002ee01d31"
+  },
+  "input_provenance": {
+    "snapshot_root": "../blockpose/data/registration_snapshots",
+    "manifest_sha256": "1e8e45fe6a23e2ca689e0a7464d613f7f9be318399d603bf4e67111f2c89646c",
+    "annotation_files_sha256": "bfc4f828858b3093a8107037a3e7772fab1324fb6a1417b49a870df1d42a730d",
+    "cloud_and_tf_files_sha256": "ba2845e30e55a4c3948639257df9a530d9916ba57a7710163e512fe69dac4f14"
+  },
+  "matcher": {
+    "center_distance_compatibility_m": 0.5,
+    "dimension_sorted_atol_m": 0.03,
+    "max_rotation_deg": 30.0,
+    "assignment": "maximum_cardinality_one_to_one"
+  },
+  "result": {
+    "snapshots_scored": 23,
+    "targets": 61,
+    "predictions_scored_roi": 39,
+    "matched": 34,
+    "false_positives": 5,
+    "false_negatives": 27,
+    "precision": 0.8717948717948718,
+    "recall": 0.5573770491803278
+  }
+}
