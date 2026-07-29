@@ -115,6 +115,11 @@ struct CuboidHypothesis {
   double support_height_m{0.0};
   std::optional<std::size_t> lineage_index;
   PriorMatch prior_match;
+  // Provenance is diagnostic-only.  The numerical selector deliberately does
+  // not inspect either value; they let an offline trace follow a candidate
+  // through refinement and NMS without reconstructing identity from floats.
+  std::string trace_id;
+  std::string source{"plane_fit"};
 };
 // leftover_points/stop_reason are diagnostic only: recorded strictly after the
 // extraction loop below decides to stop, never consulted by it. stop_reason is

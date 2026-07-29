@@ -53,6 +53,31 @@ poses through `scene_discovery.priors.*` (both disabled by default).
 Active priors are published as translucent magenta cubes on `markers`; the
 normal detected blocks remain orange.
 
+## Module ablations and debug outlets
+
+The deployed replay overlay exposes independent `modules.*.enabled` switches
+for refinement, gripper self-filtering, FK/request priors, and the classical
+RGB edge prior. A disabled module is a no-op; the numerical parameters remain
+unchanged, so one YAML file supports controlled replay ablations. The node
+reports each module as **enabled**, **available**, and **applied/gated** in a
+versioned diagnostic JSON message.
+
+With `debug.enabled:=true`, inspect these detector-owned request snapshots in
+RViz or Foxglove (all use `world` except the RGB image):
+
+- `/cbp/debug/scene_discovery/detector/input_cloud` — input after scene bounds
+- `/cbp/debug/scene_discovery/detector/geometry_cloud` — after gripper removal
+- `/cbp/debug/scene_discovery/detector/above_ground_cloud` — geometry input
+- `/cbp/debug/scene_discovery/detector/markers` — gripper boxes, priors,
+  candidates, rejected candidates, and final score contributions
+- `/cbp/debug/scene_discovery/detector/rgb_input` — exact image selected for
+  RGB evidence
+- `/cbp/debug/scene_discovery/detector/diagnostics` — `std_msgs/String` JSON;
+  module gates, counts, proposal gates, candidate lineage, and final evidence
+
+The RGB module is only a bounded tie-breaker. Missing or gated RGB falls back
+to geometry-only selection; it does not create poses.
+
 ## Offline snapshot runner
 
 `concrete_block_detector_snapshot_runner` runs the same C++ core on a recorded
@@ -72,6 +97,9 @@ ros2 run concrete_block_detector concrete_block_detector_snapshot_runner \
 Repeat `--snapshot` to emit one JSON record per snapshot. The runner only
 supports the repository's `DATA ascii`, `FIELDS x y z` PCD format and reports
 an error for other encodings rather than silently changing detector input.
+Its schema-v2 `candidate_trace` is post-refinement, pre-NMS candidate data,
+including source and separate geometry/prior/RGB contributions. It is the
+offline ablation/DINO input, rather than a reconstructed Python candidate set.
 
 `scene_bounds` optionally crops the transformed cloud before ground removal and
 clustering. The shipped bounds are calibrated to the three-block staging area

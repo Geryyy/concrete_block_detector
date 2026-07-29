@@ -9,8 +9,10 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <optional>
 #include <sstream>
@@ -28,6 +30,29 @@ using detector_core::Point;
 using detector_core::Points;
 using detector_core::SensorContext;
 using json = nlohmann::json;
+
+#ifndef CBP_DETECTOR_GIT_REVISION
+#define CBP_DETECTOR_GIT_REVISION "unknown"
+#endif
+
+// A cheap, deterministic content identity for replay artifacts. It is not a
+// security primitive; it stops an offline experiment from pairing a trace with
+// a same-named but different cloud/TF/parameter file without adding a runtime
+// crypto dependency to the ROS package.
+std::string fnv1a64_file(const std::filesystem::path & path)
+{
+  std::ifstream stream(path, std::ios::binary);
+  if (!stream) {throw std::runtime_error("unable to fingerprint " + path.string());}
+  std::uint64_t hash = 14695981039346656037ULL;
+  char byte = 0;
+  while (stream.get(byte)) {
+    hash ^= static_cast<unsigned char>(byte);
+    hash *= 1099511628211ULL;
+  }
+  std::ostringstream result;
+  result << "fnv1a64:" << std::hex << std::setfill('0') << std::setw(16) << hash;
+  return result.str();
+}
 
 struct RuntimeParameters
 {
@@ -56,6 +81,14 @@ struct RuntimeParameters
     double translation_tolerance_m{0.30};
     double orientation_tolerance_rad{0.70};
   } fk_prior;
+  bool rgb_edge_prior_configured{false};
+  // Mirrors the ROS adapter's ablation switches. The runner has no request
+  // priors or timestamped RGB scorer, but it must still faithfully disable
+  // the core modules it does support.
+  bool module_sdf_refinement_enabled{true};
+  bool module_gripper_self_filter_enabled{true};
+  bool module_fk_prior_enabled{true};
+  bool module_rgb_edge_prior_enabled{true};
 };
 
 struct Arguments
@@ -175,8 +208,27 @@ void load_parameters_file(const std::filesystem::path & path, RuntimeParameters 
       assign_if_present(fk, "orientation_tolerance_rad", runtime.fk_prior.orientation_tolerance_rad);
     }
   }
+  if (const auto rgb = parameters["rgb_edge_prior"]) {
+    assign_if_present(rgb, "enabled", runtime.rgb_edge_prior_configured);
+  }
+  if (const auto modules = parameters["modules"]) {
+    if (const auto refinement = modules["sdf_refinement"]) {
+      assign_if_present(refinement, "enabled", runtime.module_sdf_refinement_enabled);
+    }
+    if (const auto filter = modules["gripper_self_filter"]) {
+      assign_if_present(filter, "enabled", runtime.module_gripper_self_filter_enabled);
+    }
+    if (const auto priors = modules["priors"]) {
+      if (const auto fk = priors["fk"]) {
+        assign_if_present(fk, "enabled", runtime.module_fk_prior_enabled);
+      }
+    }
+    if (const auto rgb = modules["rgb_edge_prior"]) {
+      assign_if_present(rgb, "enabled", runtime.module_rgb_edge_prior_enabled);
+    }
+  }
   const auto detector = parameters["detector"];
-  if (!detector) {return;}
+  if (detector) {
   auto & p = runtime.detector;
   assign_if_present(detector, "voxel_size", p.voxel_size);
   assign_if_present(detector, "ground_thickness", p.ground_thickness);
@@ -224,6 +276,13 @@ void load_parameters_file(const std::filesystem::path & path, RuntimeParameters 
       p.candidate_dims.push_back({{dims[index].as<double>(), dims[index + 1U].as<double>(), dims[index + 2U].as<double>()}});
     }
   }
+  }
+  runtime.refine_enabled = runtime.refine_enabled && runtime.module_sdf_refinement_enabled;
+  runtime.gripper_self_filter_enabled =
+    runtime.gripper_self_filter_enabled && runtime.module_gripper_self_filter_enabled;
+  if (!runtime.module_fk_prior_enabled) {runtime.fk_prior.weight = 0.0;}
+  runtime.rgb_edge_prior_configured =
+    runtime.rgb_edge_prior_configured && runtime.module_rgb_edge_prior_enabled;
 }
 
 Points load_ascii_xyz_pcd(const std::filesystem::path & path)
@@ -441,6 +500,43 @@ json pose_json(const detector_core::CuboidHypothesis & hypothesis)
     {"proposal_scale_m", hypothesis.proposal_scale_m ? json(*hypothesis.proposal_scale_m) : json(nullptr)},
     {"support_height_m", hypothesis.support_height_m},
     {"prior_match", {{"source", hypothesis.prior_match.source}, {"score", hypothesis.prior_match.score}, {"translation_error_m", hypothesis.prior_match.translation_error_m}, {"orientation_error_rad", hypothesis.prior_match.orientation_error_rad}}},
+    {"visual_evidence", {{"available", hypothesis.visual_evidence.available}, {"score", hypothesis.visual_evidence.score}}},
+    {"trace_id", hypothesis.trace_id}, {"source", hypothesis.source},
+  };
+}
+
+json refined_candidate_trace_json(const detector_core::RefinedCandidateTrace & trace)
+{
+  const auto pose = pose_json(detector_core::CuboidHypothesis{
+    trace.pose, trace.evidence, trace.visual_evidence, {}, 0.0,
+    trace.lineage_index, trace.prior_match});
+  return {
+    {"id", trace.id}, {"source", trace.source},
+    {"lineage_index", trace.lineage_index ? json(*trace.lineage_index) : json(nullptr)},
+    {"lineage_id", trace.lineage_id}, {"pose", pose},
+    // Kept both flattened and nested to make CSV/Parquet ingestion simple
+    // while retaining the exact existing evidence representation.
+    {"geometry_score", trace.evidence.score},
+    {"prior_contribution", trace.prior_match.score},
+    {"visual_contribution", trace.visual_evidence.available ? trace.visual_evidence.score : 0.0},
+    {"selection_score", trace.selection_score},
+    {"stage", trace.stage},
+    {"fate", trace.fate},
+  };
+}
+
+json modules_config_json(const RuntimeParameters & runtime)
+{
+  return {
+    {"geometry", {{"configured", true}, {"applied", true}}},
+    {"refinement", {{"configured", runtime.module_sdf_refinement_enabled}, {"applied", runtime.refine_enabled}}},
+    {"scene_bounds", {{"configured", runtime.scene_bounds_enabled}, {"applied", runtime.scene_bounds_enabled}}},
+    {"gripper_self_filter", {{"configured", runtime.module_gripper_self_filter_enabled}, {"applied", runtime.gripper_self_filter_enabled}}},
+    {"priors", {{"fk", {{"configured", runtime.module_fk_prior_enabled}, {"applied", runtime.fk_prior.weight > 0.0}}},
+                {"registered", {{"configured", false}, {"applied", false}, {"reason", "snapshot runner has no world-model request priors"}}},
+                {"wall_plan", {{"configured", false}, {"applied", false}, {"reason", "snapshot runner has no world-model request priors"}}}}},
+    {"rgb_edge_prior", {{"configured", runtime.module_rgb_edge_prior_enabled && runtime.rgb_edge_prior_configured}, {"applied", false},
+                         {"reason", "snapshot runner has no timestamped RGB/CameraInfo scorer"}}},
   };
 }
 
@@ -587,17 +683,24 @@ json run_snapshot(const std::filesystem::path & snapshot, const RuntimeParameter
   for (const auto & diag : detection.plane_patch_diagnostics) {plane_patch_diagnostics.push_back(plane_patch_diagnostics_json(diag));}
   json pairing_diagnostics = json::array();
   for (const auto & diag : detection.pairing_diagnostics) {pairing_diagnostics.push_back(pairing_diagnostics_json(diag));}
+  json refined_candidate_trace = json::array();
+  for (const auto & trace : detection.refined_candidate_trace) {
+    refined_candidate_trace.push_back(refined_candidate_trace_json(trace));
+  }
   return {
     {"snapshot", snapshot.filename().string()},
     {"snapshot_path", snapshot.string()},
-    {"schema_version", 1},
+    {"schema_version", 2},
     {"world_frame", "world"},
     {"cloud_frame", "seyond"},
+    {"input_fingerprints", {{"cloud_pcd", fnv1a64_file(snapshot / "cloud.pcd")},
+                             {"tf_yaml", fnv1a64_file(snapshot / "tf.yaml")}}},
     {"raw_sensor_points", sensor_points.size()},
     {"world_points_before_scene_bounds", world_returns.size()},
     {"detector_input_points", detection_points.size()},
     {"sensor_origin_world", {origin.x(), origin.y(), origin.z()}},
     {"refine_enabled", runtime.refine_enabled},
+    {"candidate_trace_stage", runtime.refine_enabled ? "post_refinement_pre_nms" : "pre_refinement_pre_selection"},
     {"scene_bounds_enabled", runtime.scene_bounds_enabled},
     {"gripper_self_filter_enabled", runtime.gripper_self_filter_enabled},
     {"gripper_filter_boxes", gripper_boxes.size()},
@@ -605,6 +708,7 @@ json run_snapshot(const std::filesystem::path & snapshot, const RuntimeParameter
     {"gripper_filter_unavailable_frames", unavailable_gripper_frames},
     {"pose_priors", priors.size()},
     {"pose_prior_unavailable_frames", unavailable_prior_frames},
+    {"modules", modules_config_json(runtime)},
     {"runtime_ms", elapsed},
     {"counts", counts_json(detection.counts)},
     {"poses", poses}, {"raw_lineage", raw_lineage},
@@ -613,6 +717,11 @@ json run_snapshot(const std::filesystem::path & snapshot, const RuntimeParameter
     {"plane_region_diagnostics", plane_region_diagnostics},
     {"plane_patch_diagnostics", plane_patch_diagnostics},
     {"pairing_diagnostics", pairing_diagnostics},
+    // Blockpose consumes this stable production-candidate contract.  Keep the
+    // older descriptive alias during the schema-v2 transition for ad-hoc
+    // inspection scripts written before the export integration landed.
+    {"candidate_trace", refined_candidate_trace},
+    {"refined_candidate_trace", refined_candidate_trace},
   };
 }
 }  // namespace
@@ -632,11 +741,18 @@ int main(int argc, char * argv[])
     }
     if (arguments.min_score) {parameters.detector.min_score = *arguments.min_score;}
     json output;
-    output["schema_version"] = 1;
+    output["schema_version"] = 2;
     output["runner"] = "concrete_block_detector_snapshot_runner";
+    output["detector_git_revision"] = CBP_DETECTOR_GIT_REVISION;
     output["parameter_files"] = json::array();
     for (const auto & path : arguments.params_files) {output["parameter_files"].push_back(path.string());}
+    output["parameter_fingerprints"] = json::array();
+    for (const auto & path : arguments.params_files) {
+      output["parameter_fingerprints"].push_back(
+        {{"path", path.string()}, {"content", fnv1a64_file(path)}});
+    }
     output["fk_prior_enabled"] = parameters.fk_prior.weight > 0.0;
+    output["modules"] = modules_config_json(parameters);
     output["snapshots"] = json::array();
     for (const auto & snapshot : arguments.snapshots) {output["snapshots"].push_back(run_snapshot(snapshot, parameters));}
     std::cout << output.dump(2) << '\n';

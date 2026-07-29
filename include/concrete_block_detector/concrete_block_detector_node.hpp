@@ -9,6 +9,7 @@
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
+#include <std_msgs/msg/string.hpp>
 #include <concrete_block_world_model_interfaces/msg/block_array.hpp>
 #include <concrete_block_world_model_interfaces/srv/discover_blocks.hpp>
 #include <tf2_ros/buffer.h>
@@ -66,6 +67,19 @@ struct RgbEdgePriorConfig
   int max_image_dimension_px{768};
 };
 
+// Request-scoped outlets. They describe the detector's own decisions and are
+// deliberately separate from the world-model's human-facing final overlay.
+struct DetectorDebugConfig
+{
+  bool enabled{false};
+  bool publish_clouds{true};
+  bool publish_markers{true};
+  bool publish_diagnostics{true};
+  bool publish_rgb_input{true};
+  bool publish_rejected_candidates{true};
+  std::string topic_prefix{"/cbp/debug/scene_discovery/detector"};
+};
+
 class ConcreteBlockDetectorNode : public rclcpp::Node
 {
 public:
@@ -85,6 +99,7 @@ private:
     const detector_core::SensorContext & sensor_context,
     const std::vector<GripperFilterBox> & gripper_boxes,
     const detector_core::PosePriors & priors,
+    std::size_t request_prior_count,
     const sensor_msgs::msg::Image::ConstSharedPtr & rgb,
     const sensor_msgs::msg::CameraInfo::ConstSharedPtr & camera_info);
   void rgb_callback(const sensor_msgs::msg::Image::ConstSharedPtr image);
@@ -99,7 +114,12 @@ private:
   std::string discover_service_;
   double cached_cloud_max_age_s_;
   bool refine_enabled_;
+  bool sdf_refinement_module_enabled_{true};
   bool gripper_self_filter_enabled_;
+  bool gripper_self_filter_module_enabled_{true};
+  bool fk_prior_module_enabled_{true};
+  bool request_priors_module_enabled_{true};
+  bool rgb_edge_prior_module_enabled_{true};
   bool gripper_self_filter_publish_markers_;
   double gripper_self_filter_outboard_extent_m_;
   double gripper_self_filter_cross_rail_extent_m_;
@@ -107,6 +127,7 @@ private:
   std::vector<GripperRailBoxConfig> gripper_self_filter_rails_;
   FkPosePriorConfig fk_pose_prior_;
   RgbEdgePriorConfig rgb_edge_prior_;
+  DetectorDebugConfig debug_;
   detector_core::DetectionParameters detector_parameters_;
 
   point_cloud_transport::Subscriber cloud_sub_;
@@ -115,6 +136,12 @@ private:
   rclcpp::CallbackGroup::SharedPtr cloud_callback_group_;
   rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr poses_pub_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr markers_pub_;
+  rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr debug_markers_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr debug_input_cloud_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr debug_geometry_cloud_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr debug_above_ground_cloud_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr debug_rgb_input_pub_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr debug_diagnostics_pub_;
   rclcpp::Service<concrete_block_world_model_interfaces::srv::DiscoverBlocks>::SharedPtr
     discover_blocks_srv_;
   std::mutex cached_cloud_mutex_;

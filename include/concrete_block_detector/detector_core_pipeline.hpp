@@ -6,6 +6,7 @@
 #include "concrete_block_detector/detector_core_refine.hpp"
 
 #include <map>
+#include <set>
 
 namespace concrete_block_detector::detector_core
 {
@@ -17,9 +18,31 @@ struct PipelineCounts
   std::size_t plane_trials_evaluated{0}, plane_valid_trials{0};
   std::size_t raw_hypotheses{0}, refinement_candidates{0}, selected_hypotheses{0};
 };
+// One record for every refined candidate that reaches the final NMS input.
+// This intentionally mirrors contributions already used by
+// hypothesis_selection_score(), rather than introducing a parallel scoring
+// implementation for diagnostics or offline ablations.
+struct RefinedCandidateTrace
+{
+  std::string id;
+  std::string source;
+  std::optional<std::size_t> lineage_index;
+  std::string lineage_id;
+  Pose pose;
+  HypothesisEvidence evidence;
+  PriorMatch prior_match;
+  VisualEvidence visual_evidence;
+  double selection_score{0.0};
+  // `pre_refinement_pre_selection` when refinement is disabled, otherwise
+  // `post_refinement_pre_nms`. Consumers must not mix these stages silently.
+  std::string stage{"post_refinement_pre_nms"};
+  // "pre_nms_candidate", "final", or "post_refinement_nms_rejected".
+  std::string fate{"pre_nms_candidate"};
+};
 struct DetectionResult {
   std::vector<Pose> poses; std::vector<CuboidHypothesis> hypotheses; PipelineCounts counts;
   LocalGroundModel ground; Points above_support_points; std::vector<RawHypothesisLineage> raw_lineage;
+  std::vector<RefinedCandidateTrace> refined_candidate_trace;
   // Diagnostic only, populated below alongside raw_lineage and consumed by
   // nothing downstream of detect_without_refinement -- see the struct
   // comments in detector_core_proposals.hpp for what each field means.
@@ -156,17 +179,49 @@ inline DetectionResult detect_without_refinement(
         lineage.accepted_to_raw = top_height >= dims[2] * .70 && supported;
         lineage.fate = lineage.accepted_to_raw ? "raw" : "geometric_rejected";
         result.raw_lineage.push_back(std::move(lineage));
-        if (result.raw_lineage.back().accepted_to_raw) {hypothesis.lineage_index = result.raw_lineage.size() - 1U; raw.push_back(std::move(hypothesis));}
+        if (result.raw_lineage.back().accepted_to_raw) {
+          hypothesis.lineage_index = result.raw_lineage.size() - 1U;
+          hypothesis.trace_id = result.raw_lineage.back().id;
+          hypothesis.source = "plane_fit";
+          raw.push_back(std::move(hypothesis));
+        }
       }}
     }
   }
   result.counts.raw_hypotheses = raw.size(); std::vector<CuboidHypothesis> thresholded; for (const auto & hypothesis : raw) {if (hypothesis.evidence.score >= params.min_score) {thresholded.push_back(hypothesis); if (hypothesis.lineage_index) {auto & lineage = result.raw_lineage[*hypothesis.lineage_index]; lineage.passed_score_threshold = true; lineage.fate = "score_passed";}} else if (hypothesis.lineage_index) {result.raw_lineage[*hypothesis.lineage_index].fate = "score_rejected";}}
   if (visual_scorer != nullptr) {for (auto & hypothesis : thresholded) {hypothesis.visual_evidence = (*visual_scorer)(hypothesis.pose);}}
+  // Refinement is optional in an ablation. Preserve its exact alternative-
+  // selection input as a separately labelled trace instead of pretending the
+  // post-refinement contract exists when it does not.
+  result.refined_candidate_trace.clear();
+  result.refined_candidate_trace.reserve(thresholded.size());
+  for (std::size_t index = 0; index < thresholded.size(); ++index) {
+    const auto & candidate = thresholded[index];
+    RefinedCandidateTrace trace;
+    trace.id = candidate.trace_id.empty() ? "unrefined/" + std::to_string(index) : candidate.trace_id;
+    trace.source = candidate.source;
+    trace.lineage_index = candidate.lineage_index;
+    if (candidate.lineage_index && *candidate.lineage_index < result.raw_lineage.size()) {
+      trace.lineage_id = result.raw_lineage[*candidate.lineage_index].id;
+    }
+    trace.pose = candidate.pose;
+    trace.evidence = candidate.evidence;
+    trace.prior_match = candidate.prior_match;
+    trace.visual_evidence = candidate.visual_evidence;
+    trace.selection_score = hypothesis_selection_score(candidate);
+    trace.stage = "pre_refinement_pre_selection";
+    result.refined_candidate_trace.push_back(std::move(trace));
+  }
   result.hypotheses = select_conflict_alternatives(std::move(thresholded), params.conflict_alternatives);
   for (const auto & hypothesis : result.hypotheses) {if (hypothesis.lineage_index) {result.raw_lineage[*hypothesis.lineage_index].fate = "pre_refinement_selected";}}
   for (auto & lineage : result.raw_lineage) {if (lineage.fate == "score_passed") {lineage.fate = "pre_refinement_selection_rejected";}}
   result.counts.refinement_candidates = result.hypotheses.size();
   result.hypotheses.erase(std::remove_if(result.hypotheses.begin(), result.hypotheses.end(), [&result, &params](const auto & hypothesis) {const bool rejected = result.ground.height(hypothesis.pose.position) < 0.0 || result.ground.height(hypothesis.pose.position) > params.cluster_max_center_z; if (rejected && hypothesis.lineage_index) {result.raw_lineage[*hypothesis.lineage_index].fate = "pre_refinement_bounds_rejected";} return rejected;}), result.hypotheses.end());
+  std::set<std::string> selected_trace_ids;
+  for (const auto & hypothesis : result.hypotheses) {selected_trace_ids.insert(hypothesis.trace_id);}
+  for (auto & trace : result.refined_candidate_trace) {
+    trace.fate = selected_trace_ids.count(trace.id) > 0U ? "final" : "pre_refinement_selection_rejected";
+  }
   std::sort(result.hypotheses.begin(), result.hypotheses.end(), [](const auto & a, const auto & b) {return a.pose.position.z() > b.pose.position.z();}); for (const auto & hypothesis : result.hypotheses) {result.poses.push_back(hypothesis.pose);} result.counts.selected_hypotheses = result.hypotheses.size(); return result;
 }
 
@@ -196,7 +251,8 @@ inline DetectionResult detect(
   // it with nearby cuboid-surface returns. This recovers gripped/occluded
   // blocks that never formed a DBSCAN proposal without manufacturing a block.
   if (priors != nullptr) {
-    for (const auto & prior : *priors) {
+    for (std::size_t prior_index = 0; prior_index < priors->size(); ++prior_index) {
+      const auto & prior = (*priors)[prior_index];
       if (prior.source != "fk" || prior.weight <= 0.0 || prior.dims != params.block_dims) {continue;}
       CuboidPose seed; seed.position = prior.position; seed.rotation = prior.rotation; seed.dims = prior.dims;
       // Refine the FK initialization against only the points its surface owns.
@@ -250,6 +306,8 @@ inline DetectionResult detect(
       }
       hypothesis.prior_match = best_prior_match(pose.position, pose.rotation, pose.dims, priors);
       if (visual_scorer != nullptr) {hypothesis.visual_evidence = (*visual_scorer)(pose);}
+      hypothesis.trace_id = "seed/" + prior.source + "/" + std::to_string(prior_index);
+      hypothesis.source = prior.source + "_seed";
       result.hypotheses.push_back(std::move(hypothesis));
     }
   }
@@ -288,6 +346,8 @@ inline DetectionResult detect(
       pose, prior.evidence.support_points, result.ground,
       prior.evidence.observed_geometry_faces, sensor_context);
     hypothesis.lineage_index = prior.lineage_index;
+    hypothesis.trace_id = prior.trace_id;
+    hypothesis.source = prior.source;
     hypothesis.prior_match = best_prior_match(pose.position, pose.rotation, pose.dims, priors);
     if (visual_scorer != nullptr) {hypothesis.visual_evidence = (*visual_scorer)(pose);}
     if (result.ground.height(pose.position) >= 0.0 &&
@@ -297,7 +357,34 @@ inline DetectionResult detect(
     }
   }
   for (const auto & hypothesis : rescored) {if (hypothesis.lineage_index) {result.raw_lineage[*hypothesis.lineage_index].fate = "post_refinement_candidate";}}
+  result.refined_candidate_trace.clear();
+  result.refined_candidate_trace.reserve(rescored.size());
+  for (std::size_t index = 0; index < rescored.size(); ++index) {
+    const auto & candidate = rescored[index];
+    RefinedCandidateTrace trace;
+    trace.id = candidate.trace_id.empty() ?
+      "refined/" + std::to_string(index) : candidate.trace_id + "/refined";
+    trace.source = candidate.source;
+    trace.lineage_index = candidate.lineage_index;
+    if (candidate.lineage_index && *candidate.lineage_index < result.raw_lineage.size()) {
+      trace.lineage_id = result.raw_lineage[*candidate.lineage_index].id;
+    }
+    trace.pose = candidate.pose;
+    trace.evidence = candidate.evidence;
+    trace.prior_match = candidate.prior_match;
+    trace.visual_evidence = candidate.visual_evidence;
+    trace.selection_score = hypothesis_selection_score(candidate);
+    trace.stage = "post_refinement_pre_nms";
+    result.refined_candidate_trace.push_back(std::move(trace));
+  }
   result.hypotheses = select_hypotheses(std::move(rescored));
+  std::set<std::string> final_trace_ids;
+  for (const auto & hypothesis : result.hypotheses) {
+    final_trace_ids.insert(hypothesis.trace_id.empty() ? "" : hypothesis.trace_id + "/refined");
+  }
+  for (auto & trace : result.refined_candidate_trace) {
+    trace.fate = final_trace_ids.count(trace.id) > 0U ? "final" : "post_refinement_nms_rejected";
+  }
   for (auto & lineage : result.raw_lineage) {if (lineage.fate == "post_refinement_candidate") {lineage.fate = "post_refinement_nms_rejected";}}
   for (const auto & hypothesis : result.hypotheses) {if (hypothesis.lineage_index) {result.raw_lineage[*hypothesis.lineage_index].fate = "final";}}
   std::sort(result.hypotheses.begin(), result.hypotheses.end(), [](const auto & a, const auto & b) {

@@ -10,6 +10,7 @@
 
 #include <Eigen/Geometry>
 #include <opencv2/imgproc.hpp>
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -18,6 +19,7 @@
 #include <functional>
 #include <limits>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -286,6 +288,84 @@ detector_core::Points ros_points(const sensor_msgs::msg::PointCloud2 & cloud)
   return points;
 }
 
+sensor_msgs::msg::PointCloud2 cloud_from_points(
+  const std_msgs::msg::Header & header, const detector_core::Points & points)
+{
+  sensor_msgs::msg::PointCloud2 cloud;
+  cloud.header = header;
+  sensor_msgs::PointCloud2Modifier modifier(cloud);
+  modifier.setPointCloud2FieldsByString(1, "xyz");
+  modifier.resize(points.size());
+  sensor_msgs::PointCloud2Iterator<float> x(cloud, "x");
+  sensor_msgs::PointCloud2Iterator<float> y(cloud, "y");
+  sensor_msgs::PointCloud2Iterator<float> z(cloud, "z");
+  for (const auto & point : points) {
+    *x = static_cast<float>(point.x());
+    *y = static_cast<float>(point.y());
+    *z = static_cast<float>(point.z());
+    ++x; ++y; ++z;
+  }
+  return cloud;
+}
+
+geometry_msgs::msg::Pose pose_message(const detector_core::Pose & pose)
+{
+  geometry_msgs::msg::Pose message;
+  message.position.x = pose.position.x();
+  message.position.y = pose.position.y();
+  message.position.z = pose.position.z();
+  const Eigen::Quaterniond orientation(pose.rotation);
+  message.orientation.x = orientation.x();
+  message.orientation.y = orientation.y();
+  message.orientation.z = orientation.z();
+  message.orientation.w = orientation.w();
+  return message;
+}
+
+visualization_msgs::msg::Marker make_stage_marker(
+  const std_msgs::msg::Header & header, const detector_core::Pose & pose,
+  const std::string & name_space, int id, float red, float green, float blue,
+  float alpha, bool wireframe)
+{
+  visualization_msgs::msg::Marker marker;
+  marker.header = header;
+  marker.ns = name_space;
+  marker.id = id;
+  marker.type = wireframe ? visualization_msgs::msg::Marker::CUBE : visualization_msgs::msg::Marker::CUBE;
+  marker.action = visualization_msgs::msg::Marker::ADD;
+  marker.pose = pose_message(pose);
+  marker.scale.x = pose.dims[0];
+  marker.scale.y = pose.dims[1];
+  marker.scale.z = pose.dims[2];
+  marker.color.r = red;
+  marker.color.g = green;
+  marker.color.b = blue;
+  marker.color.a = alpha;
+  return marker;
+}
+
+visualization_msgs::msg::Marker make_stage_text(
+  const std_msgs::msg::Header & header, const detector_core::Pose & pose,
+  const std::string & name_space, int id, const std::string & text, float red,
+  float green, float blue)
+{
+  visualization_msgs::msg::Marker marker;
+  marker.header = header;
+  marker.ns = name_space;
+  marker.id = id;
+  marker.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
+  marker.action = visualization_msgs::msg::Marker::ADD;
+  marker.pose = pose_message(pose);
+  marker.pose.position.z += pose.dims[2] * 0.5 + 0.08;
+  marker.scale.z = 0.12;
+  marker.color.r = red;
+  marker.color.g = green;
+  marker.color.b = blue;
+  marker.color.a = 1.0F;
+  marker.text = text;
+  return marker;
+}
+
 detector_core::SensorContext make_sensor_context(
   const sensor_msgs::msg::PointCloud2 & cloud_world,
   const geometry_msgs::msg::TransformStamped & world_from_sensor)
@@ -408,6 +488,19 @@ ConcreteBlockDetectorNode::ConcreteBlockDetectorNode(const rclcpp::NodeOptions &
       if (values.size() != 3U) {throw std::invalid_argument(name + " must contain three values");}
       return detector_core::Point(values[0], values[1], values[2]);
     };
+  // Declare module switches before validating their individual configuration:
+  // an explicitly disabled module is a real no-op, including for an otherwise
+  // incomplete FK/RGB setup used by an ablation file.
+  sdf_refinement_module_enabled_ = declare_parameter<bool>(
+    "modules.sdf_refinement.enabled", sdf_refinement_module_enabled_);
+  gripper_self_filter_module_enabled_ = declare_parameter<bool>(
+    "modules.gripper_self_filter.enabled", gripper_self_filter_module_enabled_);
+  fk_prior_module_enabled_ = declare_parameter<bool>(
+    "modules.priors.fk.enabled", fk_prior_module_enabled_);
+  request_priors_module_enabled_ = declare_parameter<bool>(
+    "modules.priors.request.enabled", request_priors_module_enabled_);
+  rgb_edge_prior_module_enabled_ = declare_parameter<bool>(
+    "modules.rgb_edge_prior.enabled", rgb_edge_prior_module_enabled_);
   fk_pose_prior_.tcp_frame = declare_parameter<std::string>("pose_priors.fk.tcp_frame", "");
   fk_pose_prior_.tcp_to_block_xyz = local_point_parameter(
     "pose_priors.fk.tcp_to_block_xyz", {0.0, 0.0, 0.0});
@@ -418,14 +511,14 @@ ConcreteBlockDetectorNode::ConcreteBlockDetectorNode(const rclcpp::NodeOptions &
     "pose_priors.fk.translation_tolerance_m", 0.30);
   fk_pose_prior_.orientation_tolerance_rad = declare_parameter<double>(
     "pose_priors.fk.orientation_tolerance_rad", 0.70);
-  if (fk_pose_prior_.weight < 0.0 || !std::isfinite(fk_pose_prior_.weight) ||
+  if (fk_prior_module_enabled_ && (fk_pose_prior_.weight < 0.0 || !std::isfinite(fk_pose_prior_.weight) ||
     !std::isfinite(fk_pose_prior_.translation_tolerance_m) ||
     !std::isfinite(fk_pose_prior_.orientation_tolerance_rad) ||
     fk_pose_prior_.translation_tolerance_m <= 0.0 ||
     fk_pose_prior_.orientation_tolerance_rad <= 0.0 ||
     (!fk_pose_prior_.tcp_to_block_xyz.allFinite()) ||
     (!fk_pose_prior_.tcp_to_block_rpy.allFinite()) ||
-    (fk_pose_prior_.weight > 0.0 && fk_pose_prior_.tcp_frame.empty())) {
+    (fk_pose_prior_.weight > 0.0 && fk_pose_prior_.tcp_frame.empty()))) {
     throw std::invalid_argument("invalid pose_priors.fk configuration");
   }
   rgb_edge_prior_.enabled = declare_parameter<bool>("rgb_edge_prior.enabled", false);
@@ -447,13 +540,33 @@ ConcreteBlockDetectorNode::ConcreteBlockDetectorNode(const rclcpp::NodeOptions &
   rgb_edge_prior_.min_samples = declare_parameter<int>("rgb_edge_prior.min_samples", 12);
   rgb_edge_prior_.max_image_dimension_px = declare_parameter<int>(
     "rgb_edge_prior.max_image_dimension_px", 768);
-  if (rgb_edge_prior_.enabled && (rgb_edge_prior_.image_topic.empty() ||
+  if (rgb_edge_prior_module_enabled_ && rgb_edge_prior_.enabled && (rgb_edge_prior_.image_topic.empty() ||
     rgb_edge_prior_.camera_info_topic.empty() || !std::isfinite(rgb_edge_prior_.max_sync_delta_s) ||
     rgb_edge_prior_.max_sync_delta_s < 0.0 || !std::isfinite(rgb_edge_prior_.weight) ||
     rgb_edge_prior_.weight <= 0.0 || rgb_edge_prior_.min_samples < 1 ||
     rgb_edge_prior_.max_image_dimension_px < 2)) {
     throw std::invalid_argument("invalid rgb_edge_prior configuration");
   }
+  debug_.enabled = declare_parameter<bool>("debug.enabled", debug_.enabled);
+  debug_.publish_clouds = declare_parameter<bool>("debug.publish_clouds", debug_.publish_clouds);
+  debug_.publish_markers = declare_parameter<bool>("debug.publish_markers", debug_.publish_markers);
+  debug_.publish_diagnostics = declare_parameter<bool>(
+    "debug.publish_diagnostics", debug_.publish_diagnostics);
+  debug_.publish_rgb_input = declare_parameter<bool>(
+    "debug.publish_rgb_input", debug_.publish_rgb_input);
+  debug_.publish_rejected_candidates = declare_parameter<bool>(
+    "debug.publish_rejected_candidates", debug_.publish_rejected_candidates);
+  debug_.topic_prefix = declare_parameter<std::string>("debug.topic_prefix", debug_.topic_prefix);
+  if (debug_.enabled && (debug_.topic_prefix.empty() || debug_.topic_prefix.front() != '/')) {
+    throw std::invalid_argument("debug.topic_prefix must be an absolute topic prefix");
+  }
+  // The existing numeric parameters remain the source of truth. These module
+  // switches only make controlled ablations explicit and are recorded in the
+  // request debug trace, so disabled is never confused with unavailable.
+  refine_enabled_ = refine_enabled_ && sdf_refinement_module_enabled_;
+  gripper_self_filter_enabled_ = gripper_self_filter_enabled_ && gripper_self_filter_module_enabled_;
+  if (!fk_prior_module_enabled_) {fk_pose_prior_.weight = 0.0;}
+  rgb_edge_prior_.enabled = rgb_edge_prior_.enabled && rgb_edge_prior_module_enabled_;
   for (const std::string & rail : {"left_rail", "right_rail"}) {
     const std::string prefix = "gripper_self_filter." + rail;
     GripperRailBoxConfig config;
@@ -479,7 +592,32 @@ ConcreteBlockDetectorNode::ConcreteBlockDetectorNode(const rclcpp::NodeOptions &
   cloud_callback_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
   poses_pub_ = create_publisher<geometry_msgs::msg::PoseArray>("poses", 10);
   markers_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>("markers", 10);
-  if (rgb_edge_prior_.enabled) {
+  if (debug_.enabled) {
+    const auto debug_qos = rclcpp::QoS(1).reliable().transient_local();
+    if (debug_.publish_markers) {
+      debug_markers_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>(
+        debug_.topic_prefix + "/markers", debug_qos);
+    }
+    if (debug_.publish_clouds) {
+      debug_input_cloud_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(
+        debug_.topic_prefix + "/input_cloud", debug_qos);
+      debug_geometry_cloud_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(
+        debug_.topic_prefix + "/geometry_cloud", debug_qos);
+      debug_above_ground_cloud_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(
+        debug_.topic_prefix + "/above_ground_cloud", debug_qos);
+    }
+    if (debug_.publish_rgb_input) {
+      debug_rgb_input_pub_ = create_publisher<sensor_msgs::msg::Image>(
+        debug_.topic_prefix + "/rgb_input", debug_qos);
+    }
+    if (debug_.publish_diagnostics) {
+      debug_diagnostics_pub_ = create_publisher<std_msgs::msg::String>(
+        debug_.topic_prefix + "/diagnostics", debug_qos);
+    }
+  }
+  // Preserve the selected replay image as a debug outlet even when the RGB
+  // scorer is disabled for an ablation.
+  if (rgb_edge_prior_.enabled || (debug_.enabled && debug_.publish_rgb_input)) {
     rgb_sub_ = create_subscription<sensor_msgs::msg::Image>(
       rgb_edge_prior_.image_topic, rclcpp::SensorDataQoS(),
       std::bind(&ConcreteBlockDetectorNode::rgb_callback, this, std::placeholders::_1));
@@ -617,15 +755,19 @@ void ConcreteBlockDetectorNode::handle_discover_blocks(const std::shared_ptr<con
   std::shared_ptr<detector_core::SensorContext> sensor_context;
   std::vector<GripperFilterBox> gripper_boxes;
   detector_core::PosePriors priors;
+  std::size_t request_prior_count = 0U;
   sensor_msgs::msg::Image::ConstSharedPtr rgb;
   sensor_msgs::msg::CameraInfo::ConstSharedPtr camera_info;
-  try {
-    priors.reserve(request->priors.size());
-    for (const auto & message : request->priors) {priors.push_back(pose_prior_from_msg(message));}
-  } catch (const std::exception & error) {
-    response->success = false;
-    response->message = std::string("Invalid request pose prior: ") + error.what();
-    return;
+  if (request_priors_module_enabled_) {
+    try {
+      priors.reserve(request->priors.size());
+      for (const auto & message : request->priors) {priors.push_back(pose_prior_from_msg(message));}
+      request_prior_count = priors.size();
+    } catch (const std::exception & error) {
+      response->success = false;
+      response->message = std::string("Invalid request pose prior: ") + error.what();
+      return;
+    }
   }
   const auto cached_cloud_is_current = [this]() {
       if (!cached_cloud_world_ || !cached_sensor_context_) {
@@ -653,7 +795,8 @@ void ConcreteBlockDetectorNode::handle_discover_blocks(const std::shared_ptr<con
     camera_info = cached_camera_info_;
   }
   try {
-    response->blocks = discover(*cloud, *sensor_context, gripper_boxes, priors, rgb, camera_info);
+    response->blocks = discover(
+      *cloud, *sensor_context, gripper_boxes, priors, request_prior_count, rgb, camera_info);
     response->success = true;
     response->message = "Discovered " + std::to_string(response->blocks.blocks.size()) + " block(s).";
   } catch (const std::exception & error) {response->success = false; response->message = std::string("Discovery failed: ") + error.what(); RCLCPP_ERROR(get_logger(), "%s", response->message.c_str());}
@@ -664,6 +807,7 @@ concrete_block_world_model_interfaces::msg::BlockArray ConcreteBlockDetectorNode
   const detector_core::SensorContext & sensor_context,
   const std::vector<GripperFilterBox> & gripper_boxes,
   const detector_core::PosePriors & priors,
+  std::size_t request_prior_count,
   const sensor_msgs::msg::Image::ConstSharedPtr & rgb,
   const sensor_msgs::msg::CameraInfo::ConstSharedPtr & camera_info)
 {
@@ -672,12 +816,18 @@ concrete_block_world_model_interfaces::msg::BlockArray ConcreteBlockDetectorNode
   visualization_msgs::msg::MarkerArray markers; visualization_msgs::msg::Marker clear; clear.header = cloud_world.header; clear.action = visualization_msgs::msg::Marker::DELETEALL; markers.markers.push_back(clear);
   auto points = ros_points(cloud_world);
   if (scene_bounds_enabled_) {points.erase(std::remove_if(points.begin(), points.end(), [this](const auto & point) {return point.x() < scene_bounds_min_m_[0] || point.x() > scene_bounds_max_m_[0] || point.y() < scene_bounds_min_m_[1] || point.y() > scene_bounds_max_m_[1] || point.z() < scene_bounds_min_m_[2] || point.z() > scene_bounds_max_m_[2];}), points.end());}
+  if (debug_input_cloud_pub_) {
+    debug_input_cloud_pub_->publish(cloud_from_points(cloud_world.header, points));
+  }
   std::size_t gripper_points_removed = 0U;
   if (!gripper_boxes.empty()) {
     std::vector<detector_core::OrientedBox> boxes;
     boxes.reserve(gripper_boxes.size());
     for (const auto & filter_box : gripper_boxes) {boxes.push_back(filter_box.box);}
     points = detector_core::remove_points_inside_oriented_boxes(points, boxes, &gripper_points_removed);
+  }
+  if (debug_geometry_cloud_pub_) {
+    debug_geometry_cloud_pub_->publish(cloud_from_points(cloud_world.header, points));
   }
   if (gripper_self_filter_publish_markers_ && !gripper_boxes.empty()) {
     markers.markers.push_back(make_gripper_centerlines_marker(cloud_world.header, gripper_boxes));
@@ -693,15 +843,20 @@ concrete_block_world_model_interfaces::msg::BlockArray ConcreteBlockDetectorNode
   }
   std::optional<RgbEdgePrior> rgb_prior;
   detector_core::VisualScorer visual_scorer;
+  bool rgb_edge_available = false;
+  double rgb_sync_delta_s = std::numeric_limits<double>::infinity();
+  std::string rgb_gate_reason = rgb_edge_prior_.enabled ? "not_evaluated" : "disabled";
   if (rgb_edge_prior_.enabled) {
     const auto cloud_stamp_ns = rclcpp::Time(cloud_world.header.stamp).nanoseconds();
     const auto image_stamp_ns = rgb ? rclcpp::Time(rgb->header.stamp).nanoseconds() : 0;
     const double delta_s = rgb ? std::abs(static_cast<double>(cloud_stamp_ns - image_stamp_ns)) * 1.0e-9 : std::numeric_limits<double>::infinity();
+    rgb_sync_delta_s = delta_s;
     const auto gray = rgb ? grayscale_image(*rgb) : std::nullopt;
     const auto matrix = camera_info ? camera_matrix_from_info(*camera_info) : std::nullopt;
     if (!rgb || !camera_info || !gray || !matrix || delta_s > rgb_edge_prior_.max_sync_delta_s ||
       gray->cols != static_cast<int>(camera_info->width) || gray->rows != static_cast<int>(camera_info->height) ||
       camera_info->header.frame_id.empty()) {
+      rgb_gate_reason = "missing_or_invalid_input_or_sync";
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
         "RGB edge prior skipped: missing/unsupported RGB or CameraInfo, or image-cloud delta %.3f s exceeds %.3f s",
         delta_s, rgb_edge_prior_.max_sync_delta_s);
@@ -727,10 +882,14 @@ concrete_block_world_model_interfaces::msg::BlockArray ConcreteBlockDetectorNode
         rgb_prior.emplace(*gray, *matrix, distortion, isometry_from_transform(world_from_camera), excluded, parameters);
         if (rgb_prior->ready()) {
           visual_scorer = [&rgb_prior](const detector_core::Pose & pose) {return rgb_prior->score(pose);};
+          rgb_edge_available = true;
+          rgb_gate_reason = "applied";
         } else {
+          rgb_gate_reason = "edge_map_has_no_support";
           RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000, "RGB edge prior skipped: edge map has no usable support");
         }
       } catch (const tf2::TransformException & error) {
+        rgb_gate_reason = "camera_tf_unavailable";
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
           "RGB edge prior skipped: no world TF for camera '%s' at cloud stamp: %s",
           camera_info->header.frame_id.c_str(), error.what());
@@ -740,6 +899,10 @@ concrete_block_world_model_interfaces::msg::BlockArray ConcreteBlockDetectorNode
   const auto * scorer = visual_scorer ? &visual_scorer : nullptr;
   auto detection = refine_enabled_ ? detector_core::detect(points, detector_parameters_, &sensor_context, &priors, scorer) :
     detector_core::detect_without_refinement(points, detector_parameters_, &sensor_context, &priors, scorer);
+  if (debug_above_ground_cloud_pub_) {
+    debug_above_ground_cloud_pub_->publish(
+      cloud_from_points(cloud_world.header, detection.above_support_points));
+  }
   int marker_id = 0;
   for (const auto & hypothesis : detection.hypotheses) {
     const Eigen::Quaterniond orientation(hypothesis.pose.rotation);
@@ -768,6 +931,115 @@ concrete_block_world_model_interfaces::msg::BlockArray ConcreteBlockDetectorNode
     block.observed_faces = observed_faces;
     block.last_seen = cloud_world.header.stamp;
     result.blocks.push_back(std::move(block));
+  }
+  if (debug_markers_pub_) {
+    visualization_msgs::msg::MarkerArray debug_markers;
+    visualization_msgs::msg::Marker debug_clear;
+    debug_clear.header = cloud_world.header;
+    debug_clear.action = visualization_msgs::msg::Marker::DELETEALL;
+    debug_markers.markers.push_back(debug_clear);
+    if (!gripper_boxes.empty()) {
+      debug_markers.markers.push_back(make_gripper_centerlines_marker(cloud_world.header, gripper_boxes));
+      debug_markers.markers.push_back(make_gripper_outward_arrows_marker(cloud_world.header, gripper_boxes));
+      for (std::size_t index = 0; index < gripper_boxes.size(); ++index) {
+        auto marker = make_gripper_box_marker(
+          cloud_world.header, gripper_boxes[index], static_cast<int>(index));
+        marker.ns = "module/gripper_self_filter";
+        debug_markers.markers.push_back(std::move(marker));
+      }
+    }
+    for (std::size_t index = 0; index < priors.size(); ++index) {
+      if (priors[index].weight <= 0.0) {continue;}
+      auto marker = make_prior_marker(cloud_world.header, priors[index], static_cast<int>(index));
+      marker.ns = "prior/" + priors[index].source;
+      debug_markers.markers.push_back(std::move(marker));
+    }
+    int candidate_id = 0;
+    // The trace is exactly the post-refinement set NMS received. In
+    // particular it includes cloud-supported FK seeds, which raw plane-fit
+    // lineage cannot describe. This makes the visual outlet and the offline
+    // runner agree on the candidates being compared.
+    for (const auto & candidate : detection.refined_candidate_trace) {
+      const bool final = candidate.fate == "final";
+      if (!final && !debug_.publish_rejected_candidates) {continue;}
+      const float red = final ? 1.0F : 0.95F;
+      const float green = final ? 0.55F : 0.15F;
+      const float blue = final ? 0.10F : 0.15F;
+      debug_markers.markers.push_back(make_stage_marker(
+        cloud_world.header, candidate.pose,
+        final ? "candidate/final" : "candidate/pre_nms_rejected",
+        candidate_id, red, green, blue, final ? 0.78F : 0.20F, !final));
+      std::ostringstream label;
+      label << candidate.id << "\n" << candidate.source
+            << " " << candidate.fate << " g=" << candidate.evidence.score;
+      if (candidate.prior_match.score > 0.0) {
+        label << " " << candidate.prior_match.source << "=" << candidate.prior_match.score;
+      }
+      if (candidate.visual_evidence.available) {label << " rgb=" << candidate.visual_evidence.score;}
+      debug_markers.markers.push_back(make_stage_text(
+        cloud_world.header, candidate.pose, "candidate/evidence", candidate_id,
+        label.str(), red, green, blue));
+      ++candidate_id;
+    }
+    debug_markers_pub_->publish(debug_markers);
+  }
+  if (debug_rgb_input_pub_ && rgb) {debug_rgb_input_pub_->publish(*rgb);}
+  if (debug_diagnostics_pub_) {
+    using nlohmann::json;
+    const auto pose_json = [](const detector_core::Pose & pose) {
+        const Eigen::Quaterniond orientation(pose.rotation);
+        return json{{"position", {pose.position.x(), pose.position.y(), pose.position.z()}},
+          {"orientation_xyzw", {orientation.x(), orientation.y(), orientation.z(), orientation.w()}},
+          {"dimensions", pose.dims}};
+      };
+    json report{
+      {"schema", "cbp.scene_discovery.debug/v1"},
+      {"cloud_stamp_ns", rclcpp::Time(cloud_world.header.stamp).nanoseconds()},
+      {"frame", cloud_world.header.frame_id},
+      {"modules", {
+        {"scene_bounds", {{"enabled", scene_bounds_enabled_}}},
+        {"gripper_self_filter", {{"enabled", gripper_self_filter_module_enabled_ && gripper_self_filter_enabled_}, {"available", !gripper_boxes.empty()}, {"boxes", gripper_boxes.size()}, {"removed_points", gripper_points_removed}}},
+        {"geometry", {{"sdf_refinement_enabled", sdf_refinement_module_enabled_ && refine_enabled_}, {"fit_wide_proposals", detector_parameters_.fit_wide_proposals}}},
+        {"fk_prior", {{"enabled", fk_prior_module_enabled_ && fk_pose_prior_.weight > 0.0}, {"available", std::any_of(priors.begin(), priors.end(), [](const auto & prior) {return prior.source == "fk";})}}},
+        {"request_priors", {{"enabled", request_priors_module_enabled_}, {"count", request_prior_count}}},
+        {"rgb_edge_prior", {{"enabled", rgb_edge_prior_module_enabled_ && rgb_edge_prior_.enabled}, {"available", rgb_edge_available}, {"gate_reason", rgb_gate_reason}, {"sync_delta_s", rgb_sync_delta_s}}}
+      }},
+      {"counts", {{"input_points", detection.counts.input_points}, {"downsampled_points", detection.counts.downsampled_points}, {"above_ground_points", detection.counts.above_support_points}, {"proposal_components", detection.counts.proposal_components}, {"plane_regions", detection.counts.plane_regions}, {"raw_hypotheses", detection.counts.raw_hypotheses}, {"refinement_candidates", detection.counts.refinement_candidates}, {"selected_hypotheses", detection.counts.selected_hypotheses}}}
+    };
+    report["proposals"] = json::array();
+    for (const auto & proposal : detection.proposal_diagnostics) {
+      report["proposals"].push_back({
+          {"label", proposal.dbscan_label}, {"points", proposal.point_count},
+          {"extent", proposal.extent}, {"center_ground_height_m", proposal.center_ground_height},
+          {"passed", proposal.gate_passed}, {"truncated", proposal.truncated_by_max_components}});
+    }
+    report["raw_hypotheses"] = json::array();
+    for (const auto & lineage : detection.raw_lineage) {
+      report["raw_hypotheses"].push_back({
+          {"id", lineage.id}, {"fate", lineage.fate}, {"pose", pose_json(lineage.synthesized_pose)},
+          {"geometry_score", lineage.evidence.score}, {"support_points", lineage.evidence.support_points},
+          {"observed_faces", lineage.evidence.observed_geometry_faces}});
+    }
+    report["candidate_trace"] = json::array();
+    for (const auto & candidate : detection.refined_candidate_trace) {
+      report["candidate_trace"].push_back({
+          {"id", candidate.id}, {"source", candidate.source},
+          {"fate", candidate.fate}, {"pose", pose_json(candidate.pose)},
+          {"geometry_score", candidate.evidence.score},
+          {"prior", { {"source", candidate.prior_match.source}, {"score", candidate.prior_match.score} }},
+          {"visual", { {"available", candidate.visual_evidence.available}, {"score", candidate.visual_evidence.score} }},
+          {"selection_score", candidate.selection_score}});
+    }
+    report["final"] = json::array();
+    for (const auto & hypothesis : detection.hypotheses) {
+      report["final"].push_back({
+          {"pose", pose_json(hypothesis.pose)}, {"geometry_score", hypothesis.evidence.score},
+          {"visual", {{"available", hypothesis.visual_evidence.available}, {"score", hypothesis.visual_evidence.score}}},
+          {"prior", {{"source", hypothesis.prior_match.source}, {"score", hypothesis.prior_match.score}, {"translation_error_m", hypothesis.prior_match.translation_error_m}, {"orientation_error_rad", hypothesis.prior_match.orientation_error_rad}}}});
+    }
+    std_msgs::msg::String message;
+    message.data = report.dump();
+    debug_diagnostics_pub_->publish(message);
   }
   RCLCPP_INFO(
     get_logger(), "Scene discovery input: %zu point(s), gripper self-filter removed %zu point(s) using %zu rail box(es), %zu pose prior(s)",
