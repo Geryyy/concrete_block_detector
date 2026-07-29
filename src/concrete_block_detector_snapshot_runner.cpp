@@ -63,6 +63,9 @@ struct Arguments
   std::vector<std::filesystem::path> snapshots;
   std::vector<std::filesystem::path> params_files;
   bool disable_fk_prior{false};
+  bool fit_wide_proposals{false};
+  std::optional<double> cluster_max_center_z;
+  std::optional<double> min_score;
 };
 
 [[noreturn]] void usage(const std::string & message)
@@ -70,7 +73,8 @@ struct Arguments
   throw std::invalid_argument(
           message + "\nusage: concrete_block_detector_snapshot_runner "
           "--snapshot <snapshot-dir> [--snapshot <snapshot-dir> ...] "
-          "[--params <ros-parameters.yaml> ...] [--no-fk-prior]");
+          "[--params <ros-parameters.yaml> ...] [--no-fk-prior] [--fit-wide-proposals] "
+          "[--cluster-max-center-z <m>] [--min-score <score>]");
 }
 
 Arguments parse_arguments(int argc, char * argv[])
@@ -80,6 +84,20 @@ Arguments parse_arguments(int argc, char * argv[])
     const std::string argument(argv[index]);
     if (argument == "--no-fk-prior") {
       result.disable_fk_prior = true;
+      continue;
+    }
+    if (argument == "--fit-wide-proposals") {
+      result.fit_wide_proposals = true;
+      continue;
+    }
+    if (argument == "--cluster-max-center-z") {
+      if (++index >= argc) {usage("missing value for --cluster-max-center-z");}
+      result.cluster_max_center_z = std::stod(argv[index]);
+      continue;
+    }
+    if (argument == "--min-score") {
+      if (++index >= argc) {usage("missing value for --min-score");}
+      result.min_score = std::stod(argv[index]);
       continue;
     }
     if (argument == "--snapshot" || argument == "--params") {
@@ -194,6 +212,7 @@ void load_parameters_file(const std::filesystem::path & path, RuntimeParameters 
   assign_if_present(detector, "refine_preserve_top_axis_if_gravity_worsens", p.refine_preserve_top_axis_if_gravity_worsens);
   assign_if_present(detector, "min_score", p.min_score);
   assign_if_present(detector, "fk_seed_min_evidence_gain", p.fk_seed_min_evidence_gain);
+  assign_if_present(detector, "fit_wide_proposals", p.fit_wide_proposals);
   assign_if_present(detector, "conflict_alternatives", p.conflict_alternatives);
   assign_if_present(detector, "proposal_max_components", p.proposal_max_components);
   if (detector["block_dims"]) {p.block_dims = yaml_vec3(detector, "block_dims");}
@@ -607,6 +626,11 @@ int main(int argc, char * argv[])
     RuntimeParameters parameters;
     for (const auto & path : arguments.params_files) {load_parameters_file(path, parameters);}
     if (arguments.disable_fk_prior) {parameters.fk_prior.weight = 0.0;}
+    if (arguments.fit_wide_proposals) {parameters.detector.fit_wide_proposals = true;}
+    if (arguments.cluster_max_center_z) {
+      parameters.detector.cluster_max_center_z = *arguments.cluster_max_center_z;
+    }
+    if (arguments.min_score) {parameters.detector.min_score = *arguments.min_score;}
     json output;
     output["schema_version"] = 1;
     output["runner"] = "concrete_block_detector_snapshot_runner";

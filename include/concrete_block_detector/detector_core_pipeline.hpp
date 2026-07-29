@@ -110,7 +110,7 @@ inline DetectionResult detect_without_refinement(
     // Match _detect_blocks_impl: a connected region wider than a single block
     // is only admissible when the density-valley splitter supplied observable
     // boundaries.  Do not tile a seamless long object into known cuboids.
-    if (regions.size() == 1U &&
+    if (!params.fit_wide_proposals && regions.size() == 1U &&
       (proposal_extent[0] > params.cluster_max_extent_xy ||
       proposal_extent[1] > params.cluster_max_extent_xy))
     {
