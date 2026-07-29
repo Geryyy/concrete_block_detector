@@ -18,6 +18,7 @@
   <depend>point_cloud_transport</depend>
   <depend>concrete_block_world_model_interfaces</depend>
   <depend>eigen</depend>
+  <depend>opencv</depend>
   <depend>nlohmann_json</depend>
   <depend>yaml-cpp</depend>
   <exec_depend>cloudini_ros</exec_depend>

@@ -16,6 +16,7 @@ find_package(tf2_sensor_msgs REQUIRED)
 find_package(point_cloud_transport REQUIRED)
 find_package(concrete_block_world_model_interfaces REQUIRED)
 find_package(Eigen3 REQUIRED)
+find_package(OpenCV REQUIRED COMPONENTS core imgproc calib3d)
 find_package(nlohmann_json REQUIRED)
 find_package(yaml-cpp REQUIRED)
 
@@ -23,7 +24,7 @@ add_executable(concrete_block_detector_node
   src/concrete_block_detector_node.cpp
 )
 target_include_directories(concrete_block_detector_node PRIVATE include)
-target_link_libraries(concrete_block_detector_node Eigen3::Eigen)
+target_link_libraries(concrete_block_detector_node Eigen3::Eigen ${OpenCV_LIBS})
 ament_target_dependencies(concrete_block_detector_node
   rclcpp sensor_msgs geometry_msgs visualization_msgs tf2 tf2_ros
   tf2_sensor_msgs point_cloud_transport
@@ -49,10 +50,10 @@ if(BUILD_TESTING)
   function(add_detector_core_test name)
     ament_add_gtest(${name} test/${name}.cpp)
     target_include_directories(${name} PRIVATE include)
-    target_link_libraries(${name} Eigen3::Eigen)
+    target_link_libraries(${name} Eigen3::Eigen ${OpenCV_LIBS})
   endfunction()
 
-  foreach(name geometry proposals pipeline refine evidence gripper_self_filter)
+  foreach(name geometry proposals pipeline refine evidence gripper_self_filter rgb_edge_prior)
     add_detector_core_test(test_detector_core_${name})
   endforeach()
 

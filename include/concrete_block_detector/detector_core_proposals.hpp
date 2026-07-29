@@ -9,6 +9,7 @@
 #include <Eigen/Geometry>
 #include <algorithm>
 #include <array>
+#include <functional>
 #include <map>
 #include <optional>
 #include <tuple>
@@ -35,6 +36,8 @@ struct DetectionParameters
 struct PlanePatch {Point normal{Point::UnitZ()}; Point centroid{Point::Zero()}; Points points; double residual_mad{0.0};};
 struct Pose {Point position{Point::Zero()}; Eigen::Matrix3d rotation{Eigen::Matrix3d::Identity()}; std::array<double, 3> dims{{0.9, 0.6, 0.6}}; double confidence{1.0};};
 struct HypothesisEvidence {std::size_t support_points{0}; double top_height_error_m{0.0}, score{0.0}; std::size_t expected_visible_faces{0}, covered_visible_faces{0}, free_space_violations{0}, supported_rays{0}, observed_geometry_faces{0}, incident_rays{0};};
+struct VisualEvidence {double score{0.0}; bool available{false};};
+using VisualScorer = std::function<VisualEvidence(const Pose &)>;
 // A provenance record is deliberately kept separate from the numerical
 // hypothesis, making pre-refinement decisions inspectable without changing
 // any score, threshold, or selection behaviour.
@@ -107,6 +110,7 @@ inline void patch_in_plane_extents(
 struct CuboidHypothesis {
   Pose pose;
   HypothesisEvidence evidence;
+  VisualEvidence visual_evidence;
   std::optional<double> proposal_scale_m;
   double support_height_m{0.0};
   std::optional<std::size_t> lineage_index;
@@ -377,7 +381,7 @@ inline bool boxes_overlap(const Pose & first, const Pose & second, double shrink
   Eigen::Vector3d a, b; for (int i = 0; i < 3; ++i) {a[i] = std::max(first.dims[i] / 2. - shrink, 1e-3); b[i] = std::max(second.dims[i] / 2. - shrink, 1e-3);} const Eigen::Vector3d relative = first.rotation.transpose() * (second.position - first.position); const Eigen::Matrix3d coupling = first.rotation.transpose() * second.rotation, absolute = coupling.cwiseAbs().array() + 1e-9; for (int axis = 0; axis < 3; ++axis) {if (std::abs(relative[axis]) > a[axis] + absolute.row(axis).dot(b)) {return false;}} for (int axis = 0; axis < 3; ++axis) {if (std::abs(relative.dot(coupling.col(axis))) > absolute.col(axis).dot(a) + b[axis]) {return false;}} for (int i = 0; i < 3; ++i) {for (int j = 0; j < 3; ++j) {const double ra = a[(i + 1) % 3] * absolute((i + 2) % 3, j) + a[(i + 2) % 3] * absolute((i + 1) % 3, j), rb = b[(j + 1) % 3] * absolute(i, (j + 2) % 3) + b[(j + 2) % 3] * absolute(i, (j + 1) % 3), distance = std::abs(relative[(i + 2) % 3] * coupling((i + 1) % 3, j) - relative[(i + 1) % 3] * coupling((i + 2) % 3, j)); if (distance > ra + rb) {return false;}}} return true;
 }
 inline double hypothesis_selection_score(const CuboidHypothesis & hypothesis)
-{ return hypothesis.evidence.score + hypothesis.prior_match.score; }
+{ return hypothesis.evidence.score + hypothesis.prior_match.score + (hypothesis.visual_evidence.available && std::isfinite(hypothesis.visual_evidence.score) ? hypothesis.visual_evidence.score : 0.0); }
 
 inline std::vector<CuboidHypothesis> select_hypotheses(std::vector<CuboidHypothesis> hypotheses, double shrink = .08)
 { std::sort(hypotheses.begin(), hypotheses.end(), [](const auto & a, const auto & b) {const double a_score = hypothesis_selection_score(a), b_score = hypothesis_selection_score(b); return a_score == b_score ? canonical_less(a.pose.position, b.pose.position) : a_score > b_score;}); std::vector<CuboidHypothesis> selected; for (const auto & candidate : hypotheses) {bool conflict = false; for (const auto & prior : selected) {if (boxes_overlap(candidate.pose, prior.pose, shrink)) {conflict = true; break;}} if (!conflict) {selected.push_back(candidate);}} return selected; }

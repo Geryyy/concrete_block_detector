@@ -1,5 +1,6 @@
 #include "concrete_block_detector/concrete_block_detector_node.hpp"
 #include "concrete_block_detector/detector_core_pipeline.hpp"
+#include "concrete_block_detector/rgb_edge_prior.hpp"
 
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <sensor_msgs/point_cloud2_iterator.hpp>
@@ -8,6 +9,7 @@
 #include <tf2_sensor_msgs/tf2_sensor_msgs.hpp>
 
 #include <Eigen/Geometry>
+#include <opencv2/imgproc.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -15,6 +17,7 @@
 #include <cstdint>
 #include <functional>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -120,6 +123,69 @@ detector_core::Point transform_direction(
 {
   const auto & rotation = world_from_frame.transform.rotation;
   return Eigen::Quaterniond(rotation.w, rotation.x, rotation.y, rotation.z).normalized() * direction_in_frame;
+}
+
+Eigen::Isometry3d isometry_from_transform(const geometry_msgs::msg::TransformStamped & transform)
+{
+  const auto & value = transform.transform;
+  Eigen::Isometry3d result = Eigen::Isometry3d::Identity();
+  result.linear() = Eigen::Quaterniond(
+    value.rotation.w, value.rotation.x, value.rotation.y, value.rotation.z).normalized().toRotationMatrix();
+  result.translation() = Eigen::Vector3d(value.translation.x, value.translation.y, value.translation.z);
+  return result;
+}
+
+std::optional<cv::Mat> grayscale_image(const sensor_msgs::msg::Image & image)
+{
+  if (image.width == 0U || image.height == 0U || image.step == 0U) {return std::nullopt;}
+  if (image.encoding == "mono8") {
+    if (image.step < image.width || image.data.size() < static_cast<std::size_t>(image.step) * image.height) {return std::nullopt;}
+    return cv::Mat(static_cast<int>(image.height), static_cast<int>(image.width), CV_8UC1,
+      const_cast<std::uint8_t *>(image.data.data()), image.step).clone();
+  }
+  if (image.encoding != "rgb8" && image.encoding != "bgr8") {return std::nullopt;}
+  if (image.step < image.width * 3U || image.data.size() < static_cast<std::size_t>(image.step) * image.height) {return std::nullopt;}
+  cv::Mat color(static_cast<int>(image.height), static_cast<int>(image.width), CV_8UC3,
+    const_cast<std::uint8_t *>(image.data.data()), image.step);
+  cv::Mat gray;
+  cv::cvtColor(color, gray, image.encoding == "rgb8" ? cv::COLOR_RGB2GRAY : cv::COLOR_BGR2GRAY);
+  return gray;
+}
+
+std::optional<cv::Matx33d> camera_matrix_from_info(const sensor_msgs::msg::CameraInfo & info)
+{
+  if (info.width == 0U || info.height == 0U) {return std::nullopt;}
+  for (const auto value : info.k) {if (!std::isfinite(value)) {return std::nullopt;}}
+  if (info.k[0] <= 0.0 || info.k[4] <= 0.0) {return std::nullopt;}
+  return cv::Matx33d(info.k[0], info.k[1], info.k[2], info.k[3], info.k[4], info.k[5], info.k[6], info.k[7], info.k[8]);
+}
+
+cv::Mat gripper_occlusion_mask(
+  const std::vector<GripperFilterBox> & boxes, const cv::Matx33d & matrix,
+  const cv::Mat & distortion, const Eigen::Isometry3d & world_from_camera,
+  const cv::Size & size)
+{
+  cv::Mat mask = cv::Mat::zeros(size, CV_8UC1);
+  for (const auto & entry : boxes) {
+    std::vector<cv::Point3d> camera_corners;
+    camera_corners.reserve(8U);
+    for (const double x : {-0.5, 0.5}) {for (const double y : {-0.5, 0.5}) {for (const double z : {-0.5, 0.5}) {
+      const detector_core::Point world = entry.box.center + entry.box.rotation * detector_core::Point(
+        x * entry.box.size.x(), y * entry.box.size.y(), z * entry.box.size.z());
+      const Eigen::Vector3d camera = world_from_camera.linear().transpose() *
+        (world - world_from_camera.translation());
+      if (camera.z() > 1e-6) {camera_corners.emplace_back(camera.x(), camera.y(), camera.z());}
+    }}}
+    if (camera_corners.size() < 3U) {continue;}
+    std::vector<cv::Point2d> projected;
+    cv::projectPoints(camera_corners, cv::Vec3d::all(0.0), cv::Vec3d::all(0.0), matrix, distortion, projected);
+    std::vector<cv::Point> polygon;
+    for (const auto & point : projected) {if (std::isfinite(point.x) && std::isfinite(point.y)) {polygon.emplace_back(cvRound(point.x), cvRound(point.y));}}
+    if (polygon.size() < 3U) {continue;}
+    cv::convexHull(polygon, polygon);
+    cv::fillConvexPoly(mask, polygon, cv::Scalar(255), cv::LINE_8);
+  }
+  return mask;
 }
 
 visualization_msgs::msg::Marker make_gripper_box_marker(
@@ -358,6 +424,32 @@ ConcreteBlockDetectorNode::ConcreteBlockDetectorNode(const rclcpp::NodeOptions &
     (fk_pose_prior_.weight > 0.0 && fk_pose_prior_.tcp_frame.empty())) {
     throw std::invalid_argument("invalid pose_priors.fk configuration");
   }
+  rgb_edge_prior_.enabled = declare_parameter<bool>("rgb_edge_prior.enabled", false);
+  rgb_edge_prior_.image_topic = declare_parameter<std::string>(
+    "rgb_edge_prior.image_topic", "/blackfly_rotated/image_rect");
+  rgb_edge_prior_.camera_info_topic = declare_parameter<std::string>(
+    "rgb_edge_prior.camera_info_topic", "/blackfly_rotated/camera_info");
+  rgb_edge_prior_.max_sync_delta_s = declare_parameter<double>(
+    "rgb_edge_prior.max_sync_delta_s", 0.08);
+  rgb_edge_prior_.weight = declare_parameter<double>("rgb_edge_prior.weight", 0.05);
+  rgb_edge_prior_.edge_percentile = declare_parameter<double>(
+    "rgb_edge_prior.edge_percentile", 92.0);
+  rgb_edge_prior_.sample_spacing_px = declare_parameter<double>(
+    "rgb_edge_prior.sample_spacing_px", 4.0);
+  rgb_edge_prior_.distance_scale_px = declare_parameter<double>(
+    "rgb_edge_prior.distance_scale_px", 3.0);
+  rgb_edge_prior_.min_support_fraction = declare_parameter<double>(
+    "rgb_edge_prior.min_support_fraction", 0.15);
+  rgb_edge_prior_.min_samples = declare_parameter<int>("rgb_edge_prior.min_samples", 12);
+  rgb_edge_prior_.max_image_dimension_px = declare_parameter<int>(
+    "rgb_edge_prior.max_image_dimension_px", 768);
+  if (rgb_edge_prior_.enabled && (rgb_edge_prior_.image_topic.empty() ||
+    rgb_edge_prior_.camera_info_topic.empty() || !std::isfinite(rgb_edge_prior_.max_sync_delta_s) ||
+    rgb_edge_prior_.max_sync_delta_s < 0.0 || !std::isfinite(rgb_edge_prior_.weight) ||
+    rgb_edge_prior_.weight <= 0.0 || rgb_edge_prior_.min_samples < 1 ||
+    rgb_edge_prior_.max_image_dimension_px < 2)) {
+    throw std::invalid_argument("invalid rgb_edge_prior configuration");
+  }
   for (const std::string & rail : {"left_rail", "right_rail"}) {
     const std::string prefix = "gripper_self_filter." + rail;
     GripperRailBoxConfig config;
@@ -383,6 +475,14 @@ ConcreteBlockDetectorNode::ConcreteBlockDetectorNode(const rclcpp::NodeOptions &
   cloud_callback_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
   poses_pub_ = create_publisher<geometry_msgs::msg::PoseArray>("poses", 10);
   markers_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>("markers", 10);
+  if (rgb_edge_prior_.enabled) {
+    rgb_sub_ = create_subscription<sensor_msgs::msg::Image>(
+      rgb_edge_prior_.image_topic, rclcpp::SensorDataQoS(),
+      std::bind(&ConcreteBlockDetectorNode::rgb_callback, this, std::placeholders::_1));
+    camera_info_sub_ = create_subscription<sensor_msgs::msg::CameraInfo>(
+      rgb_edge_prior_.camera_info_topic, rclcpp::SensorDataQoS(),
+      std::bind(&ConcreteBlockDetectorNode::camera_info_callback, this, std::placeholders::_1));
+  }
   discover_blocks_srv_ = create_service<concrete_block_world_model_interfaces::srv::DiscoverBlocks>(discover_service_, std::bind(&ConcreteBlockDetectorNode::handle_discover_blocks, this, std::placeholders::_1, std::placeholders::_2));
 }
 
@@ -396,6 +496,19 @@ void ConcreteBlockDetectorNode::start()
     std::bind(&ConcreteBlockDetectorNode::cloud_callback, this, std::placeholders::_1),
     point_cloud_transport_name_, rclcpp::SensorDataQoS().get_rmw_qos_profile(), options);
   RCLCPP_INFO(get_logger(), "Concrete block discovery: points (%s transport) -> %s-frame cached snapshots", point_cloud_transport_name_.c_str(), world_frame_.c_str());
+}
+
+void ConcreteBlockDetectorNode::rgb_callback(const sensor_msgs::msg::Image::ConstSharedPtr image)
+{
+  std::lock_guard<std::mutex> lock(cached_cloud_mutex_);
+  cached_rgb_ = image;
+}
+
+void ConcreteBlockDetectorNode::camera_info_callback(
+  const sensor_msgs::msg::CameraInfo::ConstSharedPtr camera_info)
+{
+  std::lock_guard<std::mutex> lock(cached_cloud_mutex_);
+  cached_camera_info_ = camera_info;
 }
 
 void ConcreteBlockDetectorNode::cloud_callback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr cloud)
@@ -500,6 +613,8 @@ void ConcreteBlockDetectorNode::handle_discover_blocks(const std::shared_ptr<con
   std::shared_ptr<detector_core::SensorContext> sensor_context;
   std::vector<GripperFilterBox> gripper_boxes;
   detector_core::PosePriors priors;
+  sensor_msgs::msg::Image::ConstSharedPtr rgb;
+  sensor_msgs::msg::CameraInfo::ConstSharedPtr camera_info;
   try {
     priors.reserve(request->priors.size());
     for (const auto & message : request->priors) {priors.push_back(pose_prior_from_msg(message));}
@@ -530,9 +645,11 @@ void ConcreteBlockDetectorNode::handle_discover_blocks(const std::shared_ptr<con
     sensor_context = cached_sensor_context_;
     gripper_boxes = cached_gripper_boxes_;
     priors.insert(priors.end(), cached_fk_priors_.begin(), cached_fk_priors_.end());
+    rgb = cached_rgb_;
+    camera_info = cached_camera_info_;
   }
   try {
-    response->blocks = discover(*cloud, *sensor_context, gripper_boxes, priors);
+    response->blocks = discover(*cloud, *sensor_context, gripper_boxes, priors, rgb, camera_info);
     response->success = true;
     response->message = "Discovered " + std::to_string(response->blocks.blocks.size()) + " block(s).";
   } catch (const std::exception & error) {response->success = false; response->message = std::string("Discovery failed: ") + error.what(); RCLCPP_ERROR(get_logger(), "%s", response->message.c_str());}
@@ -542,7 +659,9 @@ concrete_block_world_model_interfaces::msg::BlockArray ConcreteBlockDetectorNode
   const sensor_msgs::msg::PointCloud2 & cloud_world,
   const detector_core::SensorContext & sensor_context,
   const std::vector<GripperFilterBox> & gripper_boxes,
-  const detector_core::PosePriors & priors)
+  const detector_core::PosePriors & priors,
+  const sensor_msgs::msg::Image::ConstSharedPtr & rgb,
+  const sensor_msgs::msg::CameraInfo::ConstSharedPtr & camera_info)
 {
   concrete_block_world_model_interfaces::msg::BlockArray result; result.header = cloud_world.header;
   geometry_msgs::msg::PoseArray poses; poses.header = cloud_world.header;
@@ -568,8 +687,55 @@ concrete_block_world_model_interfaces::msg::BlockArray ConcreteBlockDetectorNode
   for (const auto & prior : priors) {
     if (prior.weight > 0.0) {markers.markers.push_back(make_prior_marker(cloud_world.header, prior, prior_marker_id++));}
   }
-  auto detection = refine_enabled_ ? detector_core::detect(points, detector_parameters_, &sensor_context, &priors) :
-    detector_core::detect_without_refinement(points, detector_parameters_, &sensor_context, &priors);
+  std::optional<RgbEdgePrior> rgb_prior;
+  detector_core::VisualScorer visual_scorer;
+  if (rgb_edge_prior_.enabled) {
+    const auto cloud_stamp_ns = rclcpp::Time(cloud_world.header.stamp).nanoseconds();
+    const auto image_stamp_ns = rgb ? rclcpp::Time(rgb->header.stamp).nanoseconds() : 0;
+    const double delta_s = rgb ? std::abs(static_cast<double>(cloud_stamp_ns - image_stamp_ns)) * 1.0e-9 : std::numeric_limits<double>::infinity();
+    const auto gray = rgb ? grayscale_image(*rgb) : std::nullopt;
+    const auto matrix = camera_info ? camera_matrix_from_info(*camera_info) : std::nullopt;
+    if (!rgb || !camera_info || !gray || !matrix || delta_s > rgb_edge_prior_.max_sync_delta_s ||
+      gray->cols != static_cast<int>(camera_info->width) || gray->rows != static_cast<int>(camera_info->height) ||
+      camera_info->header.frame_id.empty()) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
+        "RGB edge prior skipped: missing/unsupported RGB or CameraInfo, or image-cloud delta %.3f s exceeds %.3f s",
+        delta_s, rgb_edge_prior_.max_sync_delta_s);
+    } else {
+      try {
+        const auto world_from_camera = tf_buffer_.lookupTransform(
+          world_frame_, camera_info->header.frame_id, cloud_world.header.stamp,
+          tf2::durationFromSec(transform_timeout_s_));
+        cv::Mat distortion(1, static_cast<int>(camera_info->d.size()), CV_64F);
+        for (std::size_t index = 0; index < camera_info->d.size(); ++index) {
+          distortion.at<double>(0, static_cast<int>(index)) = camera_info->d[index];
+        }
+        cv::Mat excluded = gripper_occlusion_mask(
+          gripper_boxes, *matrix, distortion, isometry_from_transform(world_from_camera), gray->size());
+        RgbEdgePriorParameters parameters;
+        parameters.weight = rgb_edge_prior_.weight;
+        parameters.edge_percentile = rgb_edge_prior_.edge_percentile;
+        parameters.sample_spacing_px = rgb_edge_prior_.sample_spacing_px;
+        parameters.distance_scale_px = rgb_edge_prior_.distance_scale_px;
+        parameters.min_support_fraction = rgb_edge_prior_.min_support_fraction;
+        parameters.min_samples = rgb_edge_prior_.min_samples;
+        parameters.max_image_dimension_px = rgb_edge_prior_.max_image_dimension_px;
+        rgb_prior.emplace(*gray, *matrix, distortion, isometry_from_transform(world_from_camera), excluded, parameters);
+        if (rgb_prior->ready()) {
+          visual_scorer = [&rgb_prior](const detector_core::Pose & pose) {return rgb_prior->score(pose);};
+        } else {
+          RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000, "RGB edge prior skipped: edge map has no usable support");
+        }
+      } catch (const tf2::TransformException & error) {
+        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
+          "RGB edge prior skipped: no world TF for camera '%s' at cloud stamp: %s",
+          camera_info->header.frame_id.c_str(), error.what());
+      }
+    }
+  }
+  const auto * scorer = visual_scorer ? &visual_scorer : nullptr;
+  auto detection = refine_enabled_ ? detector_core::detect(points, detector_parameters_, &sensor_context, &priors, scorer) :
+    detector_core::detect_without_refinement(points, detector_parameters_, &sensor_context, &priors, scorer);
   int marker_id = 0;
   for (const auto & hypothesis : detection.hypotheses) {
     const Eigen::Quaterniond orientation(hypothesis.pose.rotation);

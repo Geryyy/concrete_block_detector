@@ -72,7 +72,8 @@ inline std::vector<Points> split_connected_row(const Points & cluster, const Det
 
 inline DetectionResult detect_without_refinement(
   const Points & input, const DetectionParameters & params = {},
-  const SensorContext * sensor_context = nullptr, const PosePriors * priors = nullptr)
+  const SensorContext * sensor_context = nullptr, const PosePriors * priors = nullptr,
+  const VisualScorer * visual_scorer = nullptr)
 {
   DetectionResult result; result.counts.input_points = input.size();
   if (input.size() < 3U) {return result;}
@@ -160,6 +161,7 @@ inline DetectionResult detect_without_refinement(
     }
   }
   result.counts.raw_hypotheses = raw.size(); std::vector<CuboidHypothesis> thresholded; for (const auto & hypothesis : raw) {if (hypothesis.evidence.score >= params.min_score) {thresholded.push_back(hypothesis); if (hypothesis.lineage_index) {auto & lineage = result.raw_lineage[*hypothesis.lineage_index]; lineage.passed_score_threshold = true; lineage.fate = "score_passed";}} else if (hypothesis.lineage_index) {result.raw_lineage[*hypothesis.lineage_index].fate = "score_rejected";}}
+  if (visual_scorer != nullptr) {for (auto & hypothesis : thresholded) {hypothesis.visual_evidence = (*visual_scorer)(hypothesis.pose);}}
   result.hypotheses = select_conflict_alternatives(std::move(thresholded), params.conflict_alternatives);
   for (const auto & hypothesis : result.hypotheses) {if (hypothesis.lineage_index) {result.raw_lineage[*hypothesis.lineage_index].fate = "pre_refinement_selected";}}
   for (auto & lineage : result.raw_lineage) {if (lineage.fate == "score_passed") {lineage.fate = "pre_refinement_selection_rejected";}}
@@ -186,9 +188,10 @@ inline Eigen::Matrix3d preserve_top_axis(
 
 inline DetectionResult detect(
   const Points & input, const DetectionParameters & params = {},
-  const SensorContext * sensor_context = nullptr, const PosePriors * priors = nullptr)
+  const SensorContext * sensor_context = nullptr, const PosePriors * priors = nullptr,
+  const VisualScorer * visual_scorer = nullptr)
 {
-  DetectionResult result = detect_without_refinement(input, params, sensor_context, priors);
+  DetectionResult result = detect_without_refinement(input, params, sensor_context, priors, visual_scorer);
   if (result.hypotheses.empty()) {return result;}
   std::vector<CuboidPose> initial;
   initial.reserve(result.hypotheses.size());
@@ -225,6 +228,7 @@ inline DetectionResult detect(
       prior.evidence.observed_geometry_faces, sensor_context);
     hypothesis.lineage_index = prior.lineage_index;
     hypothesis.prior_match = best_prior_match(pose.position, pose.rotation, pose.dims, priors);
+    if (visual_scorer != nullptr) {hypothesis.visual_evidence = (*visual_scorer)(pose);}
     if (result.ground.height(pose.position) >= 0.0 &&
       result.ground.height(pose.position) <= params.cluster_max_center_z)
     {

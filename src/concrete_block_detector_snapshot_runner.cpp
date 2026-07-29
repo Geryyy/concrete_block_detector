@@ -422,7 +422,7 @@ json pose_json(const detector_core::CuboidHypothesis & hypothesis)
 json raw_lineage_json(const detector_core::RawHypothesisLineage & lineage)
 {
   const auto pose = pose_json(detector_core::CuboidHypothesis{
-    lineage.synthesized_pose, lineage.evidence, {}, 0.0, {}, {}});
+    lineage.synthesized_pose, lineage.evidence, {}, {}, 0.0, {}, {}});
   return {
     {"id", lineage.id},
     {"proposal_component", lineage.proposal_component}, {"region", lineage.region},
