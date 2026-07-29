@@ -168,6 +168,22 @@ inline DetectionResult detect_without_refinement(
   std::sort(result.hypotheses.begin(), result.hypotheses.end(), [](const auto & a, const auto & b) {return a.pose.position.z() > b.pose.position.z();}); for (const auto & hypothesis : result.hypotheses) {result.poses.push_back(hypothesis.pose);} result.counts.selected_hypotheses = result.hypotheses.size(); return result;
 }
 
+inline Eigen::Matrix3d preserve_top_axis(
+  const Eigen::Matrix3d & initial_rotation, const Eigen::Matrix3d & refined_rotation)
+{
+  const Point top_axis = initial_rotation.col(2).normalized();
+  Point x_axis = refined_rotation.col(0) - top_axis * top_axis.dot(refined_rotation.col(0));
+  if (x_axis.norm() < 1.0e-8) {
+    x_axis = initial_rotation.col(0) - top_axis * top_axis.dot(initial_rotation.col(0));
+  }
+  x_axis.normalize();
+  Eigen::Matrix3d result;
+  result.col(0) = x_axis;
+  result.col(1) = top_axis.cross(x_axis).normalized();
+  result.col(2) = top_axis;
+  return result;
+}
+
 inline DetectionResult detect(
   const Points & input, const DetectionParameters & params = {},
   const SensorContext * sensor_context = nullptr)
@@ -186,7 +202,7 @@ inline DetectionResult detect(
   refine_params.max_rotation_deg = params.refine_max_rotation_deg;
   refine_params.min_points = params.refine_min_points;
   const auto refined = refine_poses(
-    std::move(initial), result.above_support_points, params.refine_band,
+    initial, result.above_support_points, params.refine_band,
     params.refine_iterations, refine_params);
   std::vector<CuboidHypothesis> rescored;
   rescored.reserve(result.hypotheses.size());
@@ -194,6 +210,14 @@ inline DetectionResult detect(
     Pose pose = result.hypotheses[index].pose;
     pose.position = refined[index].position;
     pose.rotation = refined[index].rotation;
+    if (params.refine_preserve_top_axis_if_gravity_worsens) {
+      const Point up = result.ground.normal.normalized();
+      const double initial_alignment = std::abs(initial[index].rotation.col(2).dot(up));
+      const double refined_alignment = std::abs(pose.rotation.col(2).dot(up));
+      if (refined_alignment + 1.0e-6 < initial_alignment) {
+        pose.rotation = preserve_top_axis(initial[index].rotation, pose.rotation);
+      }
+    }
     pose.dims = refined[index].dims;
     const auto & prior = result.hypotheses[index];
     auto hypothesis = make_hypothesis(

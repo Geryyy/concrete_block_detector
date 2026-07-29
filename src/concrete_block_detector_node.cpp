@@ -273,6 +273,9 @@ ConcreteBlockDetectorNode::ConcreteBlockDetectorNode(const rclcpp::NodeOptions &
   detector_parameters_.refine_huber_scale = declare_parameter<double>("detector.refine_huber_scale", detector_parameters_.refine_huber_scale);
   detector_parameters_.refine_max_translation = declare_parameter<double>("detector.refine_max_translation", detector_parameters_.refine_max_translation);
   detector_parameters_.refine_max_rotation_deg = declare_parameter<double>("detector.refine_max_rotation_deg", detector_parameters_.refine_max_rotation_deg);
+  detector_parameters_.refine_preserve_top_axis_if_gravity_worsens = declare_parameter<bool>(
+    "detector.refine_preserve_top_axis_if_gravity_worsens",
+    detector_parameters_.refine_preserve_top_axis_if_gravity_worsens);
   const auto local_point_parameter = [this](const std::string & name, const std::vector<double> & default_value) {
       const auto values = declare_parameter<std::vector<double>>(name, default_value);
       if (values.size() != 3U) {throw std::invalid_argument(name + " must contain three values");}

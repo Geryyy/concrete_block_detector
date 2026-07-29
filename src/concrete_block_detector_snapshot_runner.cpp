@@ -161,6 +161,7 @@ void load_parameters_file(const std::filesystem::path & path, RuntimeParameters 
   assign_if_present(detector, "refine_huber_scale", p.refine_huber_scale);
   assign_if_present(detector, "refine_max_translation", p.refine_max_translation);
   assign_if_present(detector, "refine_max_rotation_deg", p.refine_max_rotation_deg);
+  assign_if_present(detector, "refine_preserve_top_axis_if_gravity_worsens", p.refine_preserve_top_axis_if_gravity_worsens);
   assign_if_present(detector, "min_score", p.min_score);
   assign_if_present(detector, "conflict_alternatives", p.conflict_alternatives);
   assign_if_present(detector, "proposal_max_components", p.proposal_max_components);
