@@ -4,11 +4,11 @@
 #include <Eigen/Core>
 #include <Eigen/Eigenvalues>
 #include <algorithm>
-#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <random>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -82,117 +82,24 @@ inline PlaneModel plane_from_triplet(const Point & a, const Point & b, const Poi
   *valid = true; normal /= length; return {normal, -normal.dot(a)};
 }
 
-// NumPy default_rng(seed) is PCG64(SeedSequence(seed)).  This is a compact,
-// direct port of NumPy 1.24's SeedSequence mixer and PCG XSL RR 128/64 path.
-// It intentionally uses the same 32-bit bounded-integer path as
-// Generator.integers(0, high), including its cached second uint32.
-class NumpyPcg64
+// RANSAC needs reproducible samples, not a particular Python RNG stream.
+// Keep that requirement explicit with the standard engine and distribution.
+class DeterministicSampler
 {
 public:
-  explicit NumpyPcg64(std::uint64_t seed)
-  {
-    const auto words = seed_sequence_state(seed);
-    const Uint128 init_state = (static_cast<Uint128>(words[0]) << 64U) | words[1];
-    const Uint128 init_sequence = (static_cast<Uint128>(words[2]) << 64U) | words[3];
-    increment_ = (init_sequence << 1U) | 1U;
-    state_ = 0U;
-    step();
-    state_ += init_state;
-    step();
-  }
+  explicit DeterministicSampler(std::uint64_t seed) : engine_(seed) {}
 
-  [[nodiscard]] std::uint32_t bounded_uint32(std::uint32_t bound)
+  [[nodiscard]] std::size_t index(std::size_t count)
   {
-    if (bound == 0U) {throw std::invalid_argument("PCG bound must be positive");}
-    const std::uint32_t threshold = static_cast<std::uint32_t>(-bound) % bound;
-    while (true) {
-      const std::uint64_t product = static_cast<std::uint64_t>(next_uint32()) * bound;
-      if (static_cast<std::uint32_t>(product) >= threshold) {
-        return static_cast<std::uint32_t>(product >> 32U);
-      }
-    }
+    if (count == 0U) {throw std::invalid_argument("sample count must be positive");}
+    return std::uniform_int_distribution<std::size_t>(0U, count - 1U)(engine_);
   }
 
 private:
-  // PCG64 requires modulo-2^128 arithmetic. GCC/Clang provide this extension;
-  // spell it explicitly so the package's -Wpedantic does not hide a warning.
-  __extension__ typedef unsigned __int128 Uint128;
-  static constexpr Uint128 kMultiplier =
-    (static_cast<Uint128>(0x2360ed051fc65da4ULL) << 64U) | 0x4385df649fccf645ULL;
-  static constexpr std::uint32_t kInitA = 0x43b0d7e5U;
-  static constexpr std::uint32_t kMultA = 0x931e8875U;
-  static constexpr std::uint32_t kInitB = 0x8b51f9ddU;
-  static constexpr std::uint32_t kMultB = 0x58f38dedU;
-  static constexpr std::uint32_t kMixMultL = 0xca01f9ddU;
-  static constexpr std::uint32_t kMixMultR = 0x4973f715U;
-  Uint128 state_{0U};
-  Uint128 increment_{0U};
-  bool has_cached_uint32_{false};
-  std::uint32_t cached_uint32_{0U};
-
-  static std::uint32_t hashmix(std::uint32_t value, std::uint32_t * hash_constant)
-  {
-    value ^= *hash_constant;
-    *hash_constant *= kMultA;
-    value *= *hash_constant;
-    return value ^ (value >> 16U);
-  }
-  static std::uint32_t mix(std::uint32_t x, std::uint32_t y)
-  {
-    std::uint32_t result = kMixMultL * x - kMixMultR * y;
-    return result ^ (result >> 16U);
-  }
-  static std::array<std::uint64_t, 4> seed_sequence_state(std::uint64_t seed)
-  {
-    std::vector<std::uint32_t> entropy{static_cast<std::uint32_t>(seed)};
-    if ((seed >> 32U) != 0U) {entropy.push_back(static_cast<std::uint32_t>(seed >> 32U));}
-    std::array<std::uint32_t, 4> pool{};
-    std::uint32_t hash_constant = kInitA;
-    for (std::size_t i = 0; i < pool.size(); ++i) {
-      pool[i] = hashmix(i < entropy.size() ? entropy[i] : 0U, &hash_constant);
-    }
-    for (std::size_t source = 0; source < pool.size(); ++source) {
-      for (std::size_t destination = 0; destination < pool.size(); ++destination) {
-        if (source != destination) {pool[destination] = mix(pool[destination], hashmix(pool[source], &hash_constant));}
-      }
-    }
-    std::array<std::uint32_t, 8> state{};
-    hash_constant = kInitB;
-    for (std::size_t i = 0; i < state.size(); ++i) {
-      std::uint32_t value = pool[i % pool.size()] ^ hash_constant;
-      hash_constant *= kMultB;
-      value *= hash_constant;
-      state[i] = value ^ (value >> 16U);
-    }
-    std::array<std::uint64_t, 4> result{};
-    for (std::size_t i = 0; i < result.size(); ++i) {
-      result[i] = static_cast<std::uint64_t>(state[2U * i]) |
-        (static_cast<std::uint64_t>(state[2U * i + 1U]) << 32U);
-    }
-    return result;
-  }
-  void step() {state_ = state_ * kMultiplier + increment_;}
-  [[nodiscard]] std::uint64_t next_uint64()
-  {
-    step();
-    const std::uint64_t high = static_cast<std::uint64_t>(state_ >> 64U);
-    const std::uint64_t low = static_cast<std::uint64_t>(state_);
-    const std::uint64_t xorshifted = high ^ low;
-    const unsigned int rotation = static_cast<unsigned int>(state_ >> 122U);
-    return (xorshifted >> rotation) | (xorshifted << ((-rotation) & 63U));
-  }
-  [[nodiscard]] std::uint32_t next_uint32()
-  {
-    if (has_cached_uint32_) {has_cached_uint32_ = false; return cached_uint32_;}
-    const std::uint64_t value = next_uint64();
-    cached_uint32_ = static_cast<std::uint32_t>(value >> 32U);
-    has_cached_uint32_ = true;
-    return static_cast<std::uint32_t>(value);
-  }
+  std::mt19937_64 engine_;
 };
 
-// Port of blockpose.ransac.segment_plane semantics, including NumPy's
-// default_rng(seed) PCG64 sampling stream.
+// Fit a dominant plane with deterministic RANSAC sampling.
 inline PlaneFitResult segment_plane(const Points & input, const RansacParameters & params)
 {
   if (input.size() < 3U) {throw std::invalid_argument("plane fitting needs at least 3 points");}
@@ -206,10 +113,10 @@ inline PlaneFitResult segment_plane(const Points & input, const RansacParameters
     }
   }
   PlaneFitResult result; result.diagnostics.input_points = points.size(); result.diagnostics.search_points = search.size();
-  NumpyPcg64 generator(params.seed);
+  DeterministicSampler generator(params.seed);
   std::size_t best_count = 0U, required = params.num_iterations;
   for (std::size_t trial = 0; trial < params.num_iterations && trial < required; ++trial) {
-    const auto first = static_cast<std::size_t>(generator.bounded_uint32(static_cast<std::uint32_t>(search.size()))), second = static_cast<std::size_t>(generator.bounded_uint32(static_cast<std::uint32_t>(search.size()))), third = static_cast<std::size_t>(generator.bounded_uint32(static_cast<std::uint32_t>(search.size()))); ++result.diagnostics.trials_evaluated;
+    const auto first = generator.index(search.size()), second = generator.index(search.size()), third = generator.index(search.size()); ++result.diagnostics.trials_evaluated;
     if (first == second || first == third || second == third) {continue;}
     bool valid = false; const PlaneModel candidate = plane_from_triplet(search[first], search[second], search[third], &valid);
     if (!valid) {continue;} ++result.diagnostics.valid_trials; std::size_t count = 0U;

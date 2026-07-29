@@ -30,33 +30,25 @@ struct DetectionResult {
   std::vector<RegionPairingDiagnostics> pairing_diagnostics;
 };
 
-// Open3D tensor voxel downsampling averages every point in a floor-indexed
-// voxel.  Canonical sort makes the C++ result independent of input ordering.
+// Average points in floor-indexed voxels. Canonical ordering makes this
+// independent of input ordering and preserves stable downstream processing.
 inline Points voxel_downsample(const Points & input, double voxel_size)
 {
   if (!std::isfinite(voxel_size) || voxel_size <= 0.0) {throw std::invalid_argument("voxel_size must be positive");}
-  struct Accumulator {Eigen::Vector3f sum{Eigen::Vector3f::Zero()}; float count{0.0F};};
+  struct Accumulator {Point sum{Point::Zero()}; std::size_t count{0U};};
   std::map<std::tuple<long long, long long, long long>, Accumulator> voxels;
-  // Open3D receives both the points and voxel size as float32 tensors.  Cast
-  // the size as well: dividing float32 positions by the original double
-  // crosses cell boundaries differently (and changes downstream RANSAC).
-  const double hash_voxel_size = static_cast<double>(static_cast<float>(voxel_size));
   for (const auto & input_point : canonical_order(input)) {
-    // blockpose _voxel_downsample explicitly converts float64 input to the
-    // Open3D tensor float32 representation before voxel hashing/averaging.
-    // Hashing the original doubles changes cells at boundaries.
-    const Eigen::Vector3f point(
-      static_cast<float>(input_point.x()), static_cast<float>(input_point.y()),
-      static_cast<float>(input_point.z()));
-    if (!point.allFinite()) {throw std::invalid_argument("points must be finite");}
-    const auto index = std::make_tuple(static_cast<long long>(std::floor(point.x() / hash_voxel_size)), static_cast<long long>(std::floor(point.y() / hash_voxel_size)), static_cast<long long>(std::floor(point.z() / hash_voxel_size)));
-    auto & value = voxels[index]; value.sum += point; value.count += 1.0F;
+    if (!input_point.allFinite()) {throw std::invalid_argument("points must be finite");}
+    const auto index = std::make_tuple(
+      static_cast<long long>(std::floor(input_point.x() / voxel_size)),
+      static_cast<long long>(std::floor(input_point.y() / voxel_size)),
+      static_cast<long long>(std::floor(input_point.z() / voxel_size)));
+    auto & value = voxels[index]; value.sum += input_point; ++value.count;
   }
   Points output;
   output.reserve(voxels.size());
   for (const auto & [_, value] : voxels) {
-    const Eigen::Vector3f average = value.sum / value.count;
-    output.emplace_back(average.cast<double>());
+    output.emplace_back(value.sum / static_cast<double>(value.count));
   }
   return canonical_order(std::move(output));
 }
