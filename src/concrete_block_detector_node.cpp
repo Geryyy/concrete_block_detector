@@ -102,7 +102,7 @@ ConcreteBlockDetectorNode::ConcreteBlockDetectorNode(const rclcpp::NodeOptions &
       if (values.size() != 3U) {throw std::invalid_argument("scene_bounds.max_m must have exactly three values");}
       return std::array<double, 3>{values[0], values[1], values[2]};
     }()),
-  point_cloud_transport_name_(declare_parameter<std::string>("point_cloud_transport", "raw")),
+  point_cloud_transport_name_(declare_parameter<std::string>("point_cloud_transport", "cloudini")),
   discover_service_(declare_parameter<std::string>("discover_service", "~/discover_blocks")),
   cached_cloud_max_age_s_(declare_parameter<double>("cached_cloud_max_age_s", 2.0)),
   refine_enabled_(declare_parameter<bool>("refine_enabled", true)),
@@ -142,15 +142,12 @@ ConcreteBlockDetectorNode::ConcreteBlockDetectorNode(const rclcpp::NodeOptions &
   detector_parameters_.min_inliers = nonnegative_size("detector.min_inliers", detector_parameters_.min_inliers);
   detector_parameters_.top_plane_angle_deg = declare_parameter<double>("detector.top_plane_angle_deg", detector_parameters_.top_plane_angle_deg);
   detector_parameters_.side_plane_angle_deg = declare_parameter<double>("detector.side_plane_angle_deg", detector_parameters_.side_plane_angle_deg);
-  detector_parameters_.max_plane_center_dist = declare_parameter<double>("detector.max_plane_center_dist", detector_parameters_.max_plane_center_dist);
   detector_parameters_.min_score = declare_parameter<double>("detector.min_score", detector_parameters_.min_score);
   detector_parameters_.conflict_alternatives = nonnegative_size("detector.conflict_alternatives", detector_parameters_.conflict_alternatives);
   if (detector_parameters_.conflict_alternatives < 1U) {
     throw std::invalid_argument("detector.conflict_alternatives must be at least one");
   }
   detector_parameters_.proposal_max_components = nonnegative_size("detector.proposal_max_components", detector_parameters_.proposal_max_components);
-  detector_parameters_.proposal_max_points = nonnegative_size("detector.proposal_max_points", detector_parameters_.proposal_max_points);
-  detector_parameters_.multiscale_proposals = declare_parameter<bool>("detector.multiscale_proposals", detector_parameters_.multiscale_proposals);
   const auto dims = declare_parameter<std::vector<double>>(
     "detector.block_dims", {0.9, 0.6, 0.6});
   if (dims.size() != 3U) {throw std::invalid_argument("detector.block_dims must contain three values");}

@@ -49,7 +49,6 @@ concrete_block_detector:
       min_inliers: 40
       top_plane_angle_deg: 30.0
       side_plane_angle_deg: 20.0
-      max_plane_center_dist: 0.6
       block_dims: [0.9, 0.6, 0.6]
       refine_band: 0.10
       refine_iterations: 2
@@ -60,5 +59,3 @@ concrete_block_detector:
       min_score: 0.0
       conflict_alternatives: 1
       proposal_max_components: 8
-      proposal_max_points: 30000
-      multiscale_proposals: false

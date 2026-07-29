@@ -24,12 +24,11 @@ struct DetectionParameters
   double cluster_min_extent_xy{0.3}, cluster_max_extent_xy{1.5}, region_max_extent_xy{3.0};
   double cluster_min_extent_z{0.3}, cluster_max_extent_z{3.5}, cluster_max_center_z{3.0};
   double ransac_distance{0.02}; std::size_t ransac_iterations{1000}, ransac_search_max_points{2048}; std::uint64_t ransac_seed{0};
-  std::size_t max_planes{5}, min_inliers{40}; double top_plane_angle_deg{30.0}, side_plane_angle_deg{20.0}, max_plane_center_dist{0.6};
+  std::size_t max_planes{5}, min_inliers{40}; double top_plane_angle_deg{30.0}, side_plane_angle_deg{20.0};
   std::array<double, 3> block_dims{{0.9, 0.6, 0.6}}; std::vector<std::array<double, 3>> candidate_dims;
   double refine_band{0.10}; std::size_t refine_iterations{2}, refine_min_points{20};
   double refine_huber_scale{0.05}, refine_max_translation{0.15}, refine_max_rotation_deg{20.0};
-  double min_score{0.0}; std::size_t conflict_alternatives{1}, proposal_max_components{8}, proposal_max_points{30000};
-  bool multiscale_proposals{false};
+  double min_score{0.0}; std::size_t conflict_alternatives{1}, proposal_max_components{8};
 };
 struct PlanePatch {Point normal{Point::UnitZ()}; Point centroid{Point::Zero()}; Points points; double residual_mad{0.0};};
 struct Pose {Point position{Point::Zero()}; Eigen::Matrix3d rotation{Eigen::Matrix3d::Identity()}; std::array<double, 3> dims{{0.9, 0.6, 0.6}}; double confidence{1.0};};

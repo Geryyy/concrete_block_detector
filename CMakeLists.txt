@@ -16,12 +16,14 @@ find_package(tf2_sensor_msgs REQUIRED)
 find_package(point_cloud_transport REQUIRED)
 find_package(concrete_block_world_model_interfaces REQUIRED)
 find_package(Eigen3 REQUIRED)
+find_package(nlohmann_json REQUIRED)
 find_package(yaml-cpp REQUIRED)
 
 add_executable(concrete_block_detector_node
   src/concrete_block_detector_node.cpp
 )
 target_include_directories(concrete_block_detector_node PRIVATE include)
+target_link_libraries(concrete_block_detector_node Eigen3::Eigen)
 ament_target_dependencies(concrete_block_detector_node
   rclcpp sensor_msgs geometry_msgs visualization_msgs tf2 tf2_ros
   tf2_sensor_msgs point_cloud_transport
@@ -35,7 +37,7 @@ add_executable(concrete_block_detector_snapshot_runner
   src/concrete_block_detector_snapshot_runner.cpp
 )
 target_include_directories(concrete_block_detector_snapshot_runner PRIVATE include)
-target_link_libraries(concrete_block_detector_snapshot_runner Eigen3::Eigen yaml-cpp)
+target_link_libraries(concrete_block_detector_snapshot_runner Eigen3::Eigen nlohmann_json::nlohmann_json yaml-cpp)
 
 # This consumes the Python-selected initialization fixture.  It is a
 # deliberately separate diagnostic executable: the normal detector tests keep
@@ -45,7 +47,7 @@ add_executable(concrete_block_detector_proposal_parity_runner
   src/concrete_block_detector_proposal_parity_runner.cpp
 )
 target_include_directories(concrete_block_detector_proposal_parity_runner PRIVATE include)
-target_link_libraries(concrete_block_detector_proposal_parity_runner Eigen3::Eigen)
+target_link_libraries(concrete_block_detector_proposal_parity_runner Eigen3::Eigen nlohmann_json::nlohmann_json)
 
 install(TARGETS concrete_block_detector_node concrete_block_detector_snapshot_runner
   concrete_block_detector_proposal_parity_runner
@@ -84,7 +86,7 @@ if(BUILD_TESTING)
     test/test_detector_core_refine.cpp
   )
   target_include_directories(test_detector_core_refine PRIVATE include)
-  target_link_libraries(test_detector_core_refine Eigen3::Eigen)
+  target_link_libraries(test_detector_core_refine Eigen3::Eigen nlohmann_json::nlohmann_json)
   target_compile_definitions(test_detector_core_refine PRIVATE
     BLOCKPOSE_SOURCE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/../blockpose"
   )

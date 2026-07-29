@@ -126,7 +126,6 @@ void load_parameters_file(const std::filesystem::path & path, RuntimeParameters 
   assign_if_present(detector, "min_inliers", p.min_inliers);
   assign_if_present(detector, "top_plane_angle_deg", p.top_plane_angle_deg);
   assign_if_present(detector, "side_plane_angle_deg", p.side_plane_angle_deg);
-  assign_if_present(detector, "max_plane_center_dist", p.max_plane_center_dist);
   assign_if_present(detector, "refine_band", p.refine_band);
   assign_if_present(detector, "refine_iterations", p.refine_iterations);
   assign_if_present(detector, "refine_min_points", p.refine_min_points);
@@ -136,8 +135,6 @@ void load_parameters_file(const std::filesystem::path & path, RuntimeParameters 
   assign_if_present(detector, "min_score", p.min_score);
   assign_if_present(detector, "conflict_alternatives", p.conflict_alternatives);
   assign_if_present(detector, "proposal_max_components", p.proposal_max_components);
-  assign_if_present(detector, "proposal_max_points", p.proposal_max_points);
-  assign_if_present(detector, "multiscale_proposals", p.multiscale_proposals);
   if (detector["block_dims"]) {p.block_dims = yaml_vec3(detector, "block_dims");}
   if (detector["candidate_dims"]) {
     const auto dims = detector["candidate_dims"];

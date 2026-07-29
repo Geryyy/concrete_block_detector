@@ -25,7 +25,7 @@ def generate_launch_description():
         ),
     )
     points_topic = DeclareLaunchArgument("points_topic", default_value="/seyond/points")
-    transport = DeclareLaunchArgument("transport", default_value="raw")
+    transport = DeclareLaunchArgument("transport", default_value="cloudini")
     use_sim_time = DeclareLaunchArgument("use_sim_time", default_value="false")
     return LaunchDescription(
         [
