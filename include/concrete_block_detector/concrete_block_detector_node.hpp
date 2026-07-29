@@ -39,6 +39,16 @@ struct GripperFilterBox
   detector_core::Point outward_normal{detector_core::Point::UnitZ()};
 };
 
+struct FkPosePriorConfig
+{
+  std::string tcp_frame;
+  detector_core::Point tcp_to_block_xyz{detector_core::Point::Zero()};
+  detector_core::Point tcp_to_block_rpy{detector_core::Point::Zero()};
+  double weight{0.0};
+  double translation_tolerance_m{0.30};
+  double orientation_tolerance_rad{0.70};
+};
+
 class ConcreteBlockDetectorNode : public rclcpp::Node
 {
 public:
@@ -56,7 +66,8 @@ private:
   concrete_block_world_model_interfaces::msg::BlockArray discover(
     const sensor_msgs::msg::PointCloud2 & cloud_world,
     const detector_core::SensorContext & sensor_context,
-    const std::vector<GripperFilterBox> & gripper_boxes);
+    const std::vector<GripperFilterBox> & gripper_boxes,
+    const detector_core::PosePriors & priors);
 
   std::string world_frame_;
   double transform_timeout_s_;
@@ -73,6 +84,7 @@ private:
   double gripper_self_filter_cross_rail_extent_m_;
   double gripper_self_filter_rail_end_margin_m_;
   std::vector<GripperRailBoxConfig> gripper_self_filter_rails_;
+  FkPosePriorConfig fk_pose_prior_;
   detector_core::DetectionParameters detector_parameters_;
 
   point_cloud_transport::Subscriber cloud_sub_;
@@ -86,6 +98,7 @@ private:
   sensor_msgs::msg::PointCloud2::SharedPtr cached_cloud_world_;
   std::shared_ptr<detector_core::SensorContext> cached_sensor_context_;
   std::vector<GripperFilterBox> cached_gripper_boxes_;
+  detector_core::PosePriors cached_fk_priors_;
   tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;
 };

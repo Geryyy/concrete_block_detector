@@ -47,6 +47,15 @@ struct RuntimeParameters
     Point outward_axis_local{Point::UnitZ()};
   };
   std::vector<GripperRail> gripper_self_filter_rails;
+  struct FkPrior
+  {
+    std::string tcp_frame;
+    Point tcp_to_block_xyz{Point::Zero()};
+    Point tcp_to_block_rpy{Point::Zero()};
+    double weight{0.0};
+    double translation_tolerance_m{0.30};
+    double orientation_tolerance_rad{0.70};
+  } fk_prior;
 };
 
 struct Arguments
@@ -125,6 +134,22 @@ void load_parameters_file(const std::filesystem::path & path, RuntimeParameters 
       const auto outward = yaml_vec3(rail, "outward_axis_local");
       parsed.outward_axis_local = Point(outward[0], outward[1], outward[2]);
       runtime.gripper_self_filter_rails.push_back(std::move(parsed));
+    }
+  }
+  if (const auto priors = parameters["pose_priors"]) {
+    if (const auto fk = priors["fk"]) {
+      assign_if_present(fk, "tcp_frame", runtime.fk_prior.tcp_frame);
+      if (fk["tcp_to_block_xyz"]) {
+        const auto values = yaml_vec3(fk, "tcp_to_block_xyz");
+        runtime.fk_prior.tcp_to_block_xyz = Point(values[0], values[1], values[2]);
+      }
+      if (fk["tcp_to_block_rpy"]) {
+        const auto values = yaml_vec3(fk, "tcp_to_block_rpy");
+        runtime.fk_prior.tcp_to_block_rpy = Point(values[0], values[1], values[2]);
+      }
+      assign_if_present(fk, "weight", runtime.fk_prior.weight);
+      assign_if_present(fk, "translation_tolerance_m", runtime.fk_prior.translation_tolerance_m);
+      assign_if_present(fk, "orientation_tolerance_rad", runtime.fk_prior.orientation_tolerance_rad);
     }
   }
   const auto detector = parameters["detector"];
@@ -244,6 +269,47 @@ Eigen::Matrix4d load_world_from_cloud(const std::filesystem::path & path)
   return load_transform(path, "world", "seyond");
 }
 
+Eigen::Matrix3d rotation_from_rpy(const Point & rpy)
+{
+  return Eigen::AngleAxisd(rpy.z(), Point::UnitZ()).toRotationMatrix() *
+         Eigen::AngleAxisd(rpy.y(), Point::UnitY()).toRotationMatrix() *
+         Eigen::AngleAxisd(rpy.x(), Point::UnitX()).toRotationMatrix();
+}
+
+detector_core::PosePriors fk_prior_from_snapshot(
+  const std::filesystem::path & tf_path, const RuntimeParameters & runtime,
+  std::vector<std::string> * unavailable_frames)
+{
+  if (runtime.fk_prior.weight <= 0.0) {return {};}
+  if (runtime.fk_prior.tcp_frame.empty() ||
+    runtime.fk_prior.translation_tolerance_m <= 0.0 ||
+    runtime.fk_prior.orientation_tolerance_rad <= 0.0 ||
+    !std::isfinite(runtime.fk_prior.weight) ||
+    !runtime.fk_prior.tcp_to_block_xyz.allFinite() ||
+    !runtime.fk_prior.tcp_to_block_rpy.allFinite())
+  {
+    throw std::invalid_argument("invalid pose_priors.fk configuration");
+  }
+  try {
+    const Eigen::Matrix4d world_from_tcp = load_transform(
+      tf_path, "world", runtime.fk_prior.tcp_frame);
+    detector_core::PosePrior prior;
+    prior.source = "fk";
+    prior.position = world_from_tcp.topLeftCorner<3, 3>() *
+      runtime.fk_prior.tcp_to_block_xyz + world_from_tcp.topRightCorner<3, 1>();
+    prior.rotation = world_from_tcp.topLeftCorner<3, 3>() *
+      rotation_from_rpy(runtime.fk_prior.tcp_to_block_rpy);
+    prior.dims = runtime.detector.block_dims;
+    prior.weight = runtime.fk_prior.weight;
+    prior.translation_tolerance_m = runtime.fk_prior.translation_tolerance_m;
+    prior.orientation_tolerance_rad = runtime.fk_prior.orientation_tolerance_rad;
+    return {prior};
+  } catch (const std::invalid_argument &) {
+    if (unavailable_frames != nullptr) {unavailable_frames->push_back(runtime.fk_prior.tcp_frame);}
+    return {};
+  }
+}
+
 Points transform_points(const Points & sensor_points, const Eigen::Matrix4d & world_from_sensor)
 {
   Points world_points;
@@ -349,13 +415,14 @@ json pose_json(const detector_core::CuboidHypothesis & hypothesis)
     {"evidence", {{"score", evidence.score}, {"support_points", evidence.support_points}, {"top_height_error_m", evidence.top_height_error_m}, {"expected_visible_faces", evidence.expected_visible_faces}, {"covered_visible_faces", evidence.covered_visible_faces}, {"free_space_violations", evidence.free_space_violations}, {"supported_rays", evidence.supported_rays}, {"observed_geometry_faces", evidence.observed_geometry_faces}, {"incident_rays", evidence.incident_rays}}},
     {"proposal_scale_m", hypothesis.proposal_scale_m ? json(*hypothesis.proposal_scale_m) : json(nullptr)},
     {"support_height_m", hypothesis.support_height_m},
+    {"prior_match", {{"source", hypothesis.prior_match.source}, {"score", hypothesis.prior_match.score}, {"translation_error_m", hypothesis.prior_match.translation_error_m}, {"orientation_error_rad", hypothesis.prior_match.orientation_error_rad}}},
   };
 }
 
 json raw_lineage_json(const detector_core::RawHypothesisLineage & lineage)
 {
   const auto pose = pose_json(detector_core::CuboidHypothesis{
-    lineage.synthesized_pose, lineage.evidence, {}, 0.0, {}});
+    lineage.synthesized_pose, lineage.evidence, {}, 0.0, {}, {}});
   return {
     {"id", lineage.id},
     {"proposal_component", lineage.proposal_component}, {"region", lineage.region},
@@ -468,6 +535,9 @@ json run_snapshot(const std::filesystem::path & snapshot, const RuntimeParameter
   std::vector<std::string> unavailable_gripper_frames;
   const auto gripper_boxes = gripper_boxes_from_snapshot(
     snapshot / "tf.yaml", runtime, &unavailable_gripper_frames);
+  std::vector<std::string> unavailable_prior_frames;
+  const auto priors = fk_prior_from_snapshot(
+    snapshot / "tf.yaml", runtime, &unavailable_prior_frames);
   std::size_t gripper_points_removed = 0U;
   if (!gripper_boxes.empty()) {
     detection_points = detector_core::remove_points_inside_oriented_boxes(
@@ -475,8 +545,8 @@ json run_snapshot(const std::filesystem::path & snapshot, const RuntimeParameter
   }
   const auto started = std::chrono::steady_clock::now();
   const DetectionResult detection = runtime.refine_enabled ?
-    detector_core::detect(detection_points, runtime.detector, &context) :
-    detector_core::detect_without_refinement(detection_points, runtime.detector, &context);
+    detector_core::detect(detection_points, runtime.detector, &context, &priors) :
+    detector_core::detect_without_refinement(detection_points, runtime.detector, &context, &priors);
   const auto elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
   json poses = json::array();
   for (const auto & hypothesis : detection.hypotheses) {poses.push_back(pose_json(hypothesis));}
@@ -508,6 +578,8 @@ json run_snapshot(const std::filesystem::path & snapshot, const RuntimeParameter
     {"gripper_filter_boxes", gripper_boxes.size()},
     {"gripper_filter_points_removed", gripper_points_removed},
     {"gripper_filter_unavailable_frames", unavailable_gripper_frames},
+    {"pose_priors", priors.size()},
+    {"pose_prior_unavailable_frames", unavailable_prior_frames},
     {"runtime_ms", elapsed},
     {"counts", counts_json(detection.counts)},
     {"poses", poses}, {"raw_lineage", raw_lineage},

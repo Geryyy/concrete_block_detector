@@ -25,6 +25,35 @@ namespace
 {
 constexpr std::array<double, 3> kDefaultDims{{0.9, 0.6, 0.6}};
 
+Eigen::Matrix3d rotation_from_rpy(const detector_core::Point & rpy)
+{
+  return Eigen::AngleAxisd(rpy.z(), Eigen::Vector3d::UnitZ()).toRotationMatrix() *
+         Eigen::AngleAxisd(rpy.y(), Eigen::Vector3d::UnitY()).toRotationMatrix() *
+         Eigen::AngleAxisd(rpy.x(), Eigen::Vector3d::UnitX()).toRotationMatrix();
+}
+
+detector_core::PosePrior pose_prior_from_msg(
+  const concrete_block_world_model_interfaces::msg::PosePrior & message)
+{
+  const auto & q = message.pose.orientation;
+  const Eigen::Quaterniond orientation(q.w, q.x, q.y, q.z);
+  if (!std::isfinite(message.weight) || !std::isfinite(message.translation_tolerance_m) ||
+    !std::isfinite(message.orientation_tolerance_rad) || orientation.norm() <= 1.0e-9)
+  {
+    throw std::invalid_argument("pose prior has non-finite values or a zero quaternion");
+  }
+  detector_core::PosePrior prior;
+  prior.source = message.source;
+  prior.position = detector_core::Point(
+    message.pose.position.x, message.pose.position.y, message.pose.position.z);
+  prior.rotation = orientation.normalized().toRotationMatrix();
+  prior.dims = {{message.dimensions[0], message.dimensions[1], message.dimensions[2]}};
+  prior.weight = message.weight;
+  prior.translation_tolerance_m = message.translation_tolerance_m;
+  prior.orientation_tolerance_rad = message.orientation_tolerance_rad;
+  return prior;
+}
+
 visualization_msgs::msg::Marker make_marker(
   const std_msgs::msg::Header & header, const geometry_msgs::msg::Pose & pose,
   const std::array<double, 3> & dims, int id)
@@ -43,6 +72,34 @@ visualization_msgs::msg::Marker make_marker(
   marker.color.g = 0.55F;
   marker.color.b = 0.10F;
   marker.color.a = 0.75F;
+  return marker;
+}
+
+visualization_msgs::msg::Marker make_prior_marker(
+  const std_msgs::msg::Header & header, const detector_core::PosePrior & prior, int id)
+{
+  visualization_msgs::msg::Marker marker;
+  marker.header = header;
+  marker.ns = "concrete_block_priors";
+  marker.id = id;
+  marker.type = visualization_msgs::msg::Marker::CUBE;
+  marker.action = visualization_msgs::msg::Marker::ADD;
+  marker.pose.position.x = prior.position.x();
+  marker.pose.position.y = prior.position.y();
+  marker.pose.position.z = prior.position.z();
+  const Eigen::Quaterniond orientation(prior.rotation);
+  marker.pose.orientation.x = orientation.x();
+  marker.pose.orientation.y = orientation.y();
+  marker.pose.orientation.z = orientation.z();
+  marker.pose.orientation.w = orientation.w();
+  marker.scale.x = prior.dims[0];
+  marker.scale.y = prior.dims[1];
+  marker.scale.z = prior.dims[2];
+  marker.color.r = 0.85F;
+  marker.color.g = 0.10F;
+  marker.color.b = 0.95F;
+  marker.color.a = 0.30F;
+  marker.text = prior.source;
   return marker;
 }
 
@@ -281,6 +338,26 @@ ConcreteBlockDetectorNode::ConcreteBlockDetectorNode(const rclcpp::NodeOptions &
       if (values.size() != 3U) {throw std::invalid_argument(name + " must contain three values");}
       return detector_core::Point(values[0], values[1], values[2]);
     };
+  fk_pose_prior_.tcp_frame = declare_parameter<std::string>("pose_priors.fk.tcp_frame", "");
+  fk_pose_prior_.tcp_to_block_xyz = local_point_parameter(
+    "pose_priors.fk.tcp_to_block_xyz", {0.0, 0.0, 0.0});
+  fk_pose_prior_.tcp_to_block_rpy = local_point_parameter(
+    "pose_priors.fk.tcp_to_block_rpy", {0.0, 0.0, 0.0});
+  fk_pose_prior_.weight = declare_parameter<double>("pose_priors.fk.weight", 0.0);
+  fk_pose_prior_.translation_tolerance_m = declare_parameter<double>(
+    "pose_priors.fk.translation_tolerance_m", 0.30);
+  fk_pose_prior_.orientation_tolerance_rad = declare_parameter<double>(
+    "pose_priors.fk.orientation_tolerance_rad", 0.70);
+  if (fk_pose_prior_.weight < 0.0 || !std::isfinite(fk_pose_prior_.weight) ||
+    !std::isfinite(fk_pose_prior_.translation_tolerance_m) ||
+    !std::isfinite(fk_pose_prior_.orientation_tolerance_rad) ||
+    fk_pose_prior_.translation_tolerance_m <= 0.0 ||
+    fk_pose_prior_.orientation_tolerance_rad <= 0.0 ||
+    (!fk_pose_prior_.tcp_to_block_xyz.allFinite()) ||
+    (!fk_pose_prior_.tcp_to_block_rpy.allFinite()) ||
+    (fk_pose_prior_.weight > 0.0 && fk_pose_prior_.tcp_frame.empty())) {
+    throw std::invalid_argument("invalid pose_priors.fk configuration");
+  }
   for (const std::string & rail : {"left_rail", "right_rail"}) {
     const std::string prefix = "gripper_self_filter." + rail;
     GripperRailBoxConfig config;
@@ -327,6 +404,7 @@ void ConcreteBlockDetectorNode::cloud_callback(const sensor_msgs::msg::PointClou
   sensor_msgs::msg::PointCloud2 world;
   detector_core::SensorContext sensor_context;
   std::vector<GripperFilterBox> gripper_boxes;
+  detector_core::PosePriors fk_priors;
   try {
     const auto transform = tf_buffer_.lookupTransform(
       world_frame_, cloud->header.frame_id, cloud->header.stamp,
@@ -334,6 +412,30 @@ void ConcreteBlockDetectorNode::cloud_callback(const sensor_msgs::msg::PointClou
     tf2::doTransform(*cloud, world, transform);
     sensor_context = make_sensor_context(world, transform);
   } catch (const tf2::TransformException & error) {RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000, "Ignoring cloud: no transform %s -> %s at its timestamp: %s", cloud->header.frame_id.c_str(), world_frame_.c_str(), error.what()); return;}
+  if (fk_pose_prior_.weight > 0.0) {
+    try {
+      const auto world_from_tcp = tf_buffer_.lookupTransform(
+        world_frame_, fk_pose_prior_.tcp_frame, cloud->header.stamp,
+        tf2::durationFromSec(transform_timeout_s_));
+      const auto & q = world_from_tcp.transform.rotation;
+      const Eigen::Matrix3d world_from_tcp_rotation =
+        Eigen::Quaterniond(q.w, q.x, q.y, q.z).normalized().toRotationMatrix();
+      detector_core::PosePrior prior;
+      prior.source = "fk";
+      prior.position = transform_point(world_from_tcp, fk_pose_prior_.tcp_to_block_xyz);
+      prior.rotation = world_from_tcp_rotation * rotation_from_rpy(fk_pose_prior_.tcp_to_block_rpy);
+      prior.dims = detector_parameters_.block_dims;
+      prior.weight = fk_pose_prior_.weight;
+      prior.translation_tolerance_m = fk_pose_prior_.translation_tolerance_m;
+      prior.orientation_tolerance_rad = fk_pose_prior_.orientation_tolerance_rad;
+      fk_priors.push_back(std::move(prior));
+    } catch (const tf2::TransformException & error) {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 5000,
+        "FK pose prior skipped: no world TF for '%s' at cloud stamp: %s",
+        fk_pose_prior_.tcp_frame.c_str(), error.what());
+    }
+  }
   if (gripper_self_filter_enabled_) {
     for (const auto & rail : gripper_self_filter_rails_) {
       try {
@@ -382,6 +484,7 @@ void ConcreteBlockDetectorNode::cloud_callback(const sensor_msgs::msg::PointClou
     cached_cloud_world_ = std::make_shared<sensor_msgs::msg::PointCloud2>(world);
     cached_sensor_context_ = std::make_shared<detector_core::SensorContext>(std::move(sensor_context));
     cached_gripper_boxes_ = std::move(gripper_boxes);
+    cached_fk_priors_ = std::move(fk_priors);
   }
   cached_cloud_cv_.notify_all();
 }
@@ -396,6 +499,15 @@ void ConcreteBlockDetectorNode::handle_discover_blocks(const std::shared_ptr<con
   sensor_msgs::msg::PointCloud2::SharedPtr cloud;
   std::shared_ptr<detector_core::SensorContext> sensor_context;
   std::vector<GripperFilterBox> gripper_boxes;
+  detector_core::PosePriors priors;
+  try {
+    priors.reserve(request->priors.size());
+    for (const auto & message : request->priors) {priors.push_back(pose_prior_from_msg(message));}
+  } catch (const std::exception & error) {
+    response->success = false;
+    response->message = std::string("Invalid request pose prior: ") + error.what();
+    return;
+  }
   const auto cached_cloud_is_current = [this]() {
       if (!cached_cloud_world_ || !cached_sensor_context_) {
         return false;
@@ -417,9 +529,10 @@ void ConcreteBlockDetectorNode::handle_discover_blocks(const std::shared_ptr<con
     cloud = cached_cloud_world_;
     sensor_context = cached_sensor_context_;
     gripper_boxes = cached_gripper_boxes_;
+    priors.insert(priors.end(), cached_fk_priors_.begin(), cached_fk_priors_.end());
   }
   try {
-    response->blocks = discover(*cloud, *sensor_context, gripper_boxes);
+    response->blocks = discover(*cloud, *sensor_context, gripper_boxes, priors);
     response->success = true;
     response->message = "Discovered " + std::to_string(response->blocks.blocks.size()) + " block(s).";
   } catch (const std::exception & error) {response->success = false; response->message = std::string("Discovery failed: ") + error.what(); RCLCPP_ERROR(get_logger(), "%s", response->message.c_str());}
@@ -428,7 +541,8 @@ void ConcreteBlockDetectorNode::handle_discover_blocks(const std::shared_ptr<con
 concrete_block_world_model_interfaces::msg::BlockArray ConcreteBlockDetectorNode::discover(
   const sensor_msgs::msg::PointCloud2 & cloud_world,
   const detector_core::SensorContext & sensor_context,
-  const std::vector<GripperFilterBox> & gripper_boxes)
+  const std::vector<GripperFilterBox> & gripper_boxes,
+  const detector_core::PosePriors & priors)
 {
   concrete_block_world_model_interfaces::msg::BlockArray result; result.header = cloud_world.header;
   geometry_msgs::msg::PoseArray poses; poses.header = cloud_world.header;
@@ -450,8 +564,12 @@ concrete_block_world_model_interfaces::msg::BlockArray ConcreteBlockDetectorNode
       markers.markers.push_back(make_gripper_box_marker(cloud_world.header, filter_box, marker_id++));
     }
   }
-  auto detection = refine_enabled_ ? detector_core::detect(points, detector_parameters_, &sensor_context) :
-    detector_core::detect_without_refinement(points, detector_parameters_, &sensor_context);
+  int prior_marker_id = 0;
+  for (const auto & prior : priors) {
+    if (prior.weight > 0.0) {markers.markers.push_back(make_prior_marker(cloud_world.header, prior, prior_marker_id++));}
+  }
+  auto detection = refine_enabled_ ? detector_core::detect(points, detector_parameters_, &sensor_context, &priors) :
+    detector_core::detect_without_refinement(points, detector_parameters_, &sensor_context, &priors);
   int marker_id = 0;
   for (const auto & hypothesis : detection.hypotheses) {
     const Eigen::Quaterniond orientation(hypothesis.pose.rotation);
@@ -482,8 +600,8 @@ concrete_block_world_model_interfaces::msg::BlockArray ConcreteBlockDetectorNode
     result.blocks.push_back(std::move(block));
   }
   RCLCPP_INFO(
-    get_logger(), "Scene discovery input: %zu point(s), gripper self-filter removed %zu point(s) using %zu rail box(es)",
-    points.size() + gripper_points_removed, gripper_points_removed, gripper_boxes.size());
+    get_logger(), "Scene discovery input: %zu point(s), gripper self-filter removed %zu point(s) using %zu rail box(es), %zu pose prior(s)",
+    points.size() + gripper_points_removed, gripper_points_removed, gripper_boxes.size(), priors.size());
   poses_pub_->publish(poses); markers_pub_->publish(markers); return result;
 }
 }  // namespace concrete_block_detector

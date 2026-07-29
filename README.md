@@ -39,6 +39,20 @@ Top-only hypotheses are marked coarse; top-and-side hypotheses are marked
 precise with conservative detector covariance.
 `world_model_node` owns association, IDs, and the single atomic world update.
 
+## Optional pose priors
+
+`DiscoverBlocks` accepts zero or more `PosePrior` records. The detector only
+uses a prior to re-rank overlapping, point-cloud-supported hypotheses; it never
+creates a block from a prior or relaxes geometric/ray-evidence gates. This is
+one uniform seam for FK, RGB, wall-plan, and previously registered-block
+knowledge. The detector's `pose_priors.fk.*` parameters create a timestamped
+FK prior from `T_world_tcp`; the grip-at-top replay overlay enables it. The
+world model can optionally forward registered poses and `goal_pose` wall-plan
+poses through `scene_discovery.priors.*` (both disabled by default).
+
+Active priors are published as translucent magenta cubes on `markers`; the
+normal detected blocks remain orange.
+
 ## Offline snapshot runner
 
 `concrete_block_detector_snapshot_runner` runs the same C++ core on a recorded

@@ -72,7 +72,7 @@ inline std::vector<Points> split_connected_row(const Points & cluster, const Det
 
 inline DetectionResult detect_without_refinement(
   const Points & input, const DetectionParameters & params = {},
-  const SensorContext * sensor_context = nullptr)
+  const SensorContext * sensor_context = nullptr, const PosePriors * priors = nullptr)
 {
   DetectionResult result; result.counts.input_points = input.size();
   if (input.size() < 3U) {return result;}
@@ -137,7 +137,7 @@ inline DetectionResult detect_without_refinement(
       for (const auto & pair : pairs) {
         Points local_support = region;
         if (pair.second != nullptr) {local_support = pair.first->points; local_support.insert(local_support.end(), pair.second->points.begin(), pair.second->points.end());}
-        const auto pose = canonicalize_pose(synthesize_pose(*pair.first, pair.second, local_support, dims)); const std::size_t support = pair.first->points.size() + (pair.second == nullptr ? 0U : pair.second->points.size()); auto hypothesis = make_hypothesis(pose, support, result.ground, pair.second == nullptr ? 1U : 2U, sensor_context);
+        const auto pose = canonicalize_pose(synthesize_pose(*pair.first, pair.second, local_support, dims)); const std::size_t support = pair.first->points.size() + (pair.second == nullptr ? 0U : pair.second->points.size()); auto hypothesis = make_hypothesis(pose, support, result.ground, pair.second == nullptr ? 1U : 2U, sensor_context); hypothesis.prior_match = best_prior_match(pose.position, pose.rotation, pose.dims, priors);
         const double top_height = result.ground.height(pair.first->centroid); const bool supported = !(top_height <= dims[2] * 1.1 && std::abs(hypothesis.support_height_m) > .135);
         const std::size_t top_index = static_cast<std::size_t>(pair.first - planes.data());
         const std::optional<std::size_t> side_index = pair.second == nullptr ? std::nullopt : std::optional<std::size_t>(static_cast<std::size_t>(pair.second - planes.data()));
@@ -186,9 +186,9 @@ inline Eigen::Matrix3d preserve_top_axis(
 
 inline DetectionResult detect(
   const Points & input, const DetectionParameters & params = {},
-  const SensorContext * sensor_context = nullptr)
+  const SensorContext * sensor_context = nullptr, const PosePriors * priors = nullptr)
 {
-  DetectionResult result = detect_without_refinement(input, params, sensor_context);
+  DetectionResult result = detect_without_refinement(input, params, sensor_context, priors);
   if (result.hypotheses.empty()) {return result;}
   std::vector<CuboidPose> initial;
   initial.reserve(result.hypotheses.size());
@@ -224,6 +224,7 @@ inline DetectionResult detect(
       pose, prior.evidence.support_points, result.ground,
       prior.evidence.observed_geometry_faces, sensor_context);
     hypothesis.lineage_index = prior.lineage_index;
+    hypothesis.prior_match = best_prior_match(pose.position, pose.rotation, pose.dims, priors);
     if (result.ground.height(pose.position) >= 0.0 &&
       result.ground.height(pose.position) <= params.cluster_max_center_z)
     {

@@ -4,6 +4,7 @@
 // This is deliberately independent of ROS/PCL so the adapter cannot diverge.
 #include "concrete_block_detector/detector_core_geometry.hpp"
 #include "concrete_block_detector/detector_core_evidence.hpp"
+#include "concrete_block_detector/detector_core_priors.hpp"
 
 #include <Eigen/Geometry>
 #include <algorithm>
@@ -103,7 +104,14 @@ inline void patch_in_plane_extents(
   *along_x = span(std::move(x));
   *along_y = span(std::move(y));
 }
-struct CuboidHypothesis {Pose pose; HypothesisEvidence evidence; std::optional<double> proposal_scale_m; double support_height_m{0.0}; std::optional<std::size_t> lineage_index;};
+struct CuboidHypothesis {
+  Pose pose;
+  HypothesisEvidence evidence;
+  std::optional<double> proposal_scale_m;
+  double support_height_m{0.0};
+  std::optional<std::size_t> lineage_index;
+  PriorMatch prior_match;
+};
 // leftover_points/stop_reason are diagnostic only: recorded strictly after the
 // extraction loop below decides to stop, never consulted by it. stop_reason is
 // one of "ransac_exception", "ransac_below_min_inliers", "max_planes_reached",
@@ -362,14 +370,17 @@ inline Pose synthesize_pose(const PlanePatch & top, const PlanePatch * side, con
 
 template<typename GroundModel>
 inline CuboidHypothesis make_hypothesis(const Pose & pose, std::size_t support_points, const GroundModel & ground, std::size_t observed_faces, const SensorContext * sensor_context = nullptr)
-{ const Point bottom = pose.position - pose.rotation.col(2) * (pose.dims[2] / 2.0); HypothesisEvidence evidence; evidence.support_points = support_points; evidence.top_height_error_m = std::abs(ground.height(bottom)); evidence.observed_geometry_faces = observed_faces; VisibilityEvidence visibility; if (sensor_context != nullptr) {visibility = visibility_evidence(pose.position, pose.rotation, pose.dims, *sensor_context); visibility.violations += free_space_violations_from_misses(pose.position, pose.rotation, pose.dims, *sensor_context); evidence.expected_visible_faces = visibility.expected_faces; evidence.covered_visible_faces = visibility.covered_faces; evidence.free_space_violations = visibility.violations; evidence.supported_rays = visibility.supported_rays; evidence.incident_rays = visibility.incident_rays;} evidence.score = normalized_evidence_score(normalized_evidence_features(evidence.support_points, evidence.top_height_error_m, visibility)); return {pose, evidence, {}, ground.height(bottom)}; }
+{ const Point bottom = pose.position - pose.rotation.col(2) * (pose.dims[2] / 2.0); HypothesisEvidence evidence; evidence.support_points = support_points; evidence.top_height_error_m = std::abs(ground.height(bottom)); evidence.observed_geometry_faces = observed_faces; VisibilityEvidence visibility; if (sensor_context != nullptr) {visibility = visibility_evidence(pose.position, pose.rotation, pose.dims, *sensor_context); visibility.violations += free_space_violations_from_misses(pose.position, pose.rotation, pose.dims, *sensor_context); evidence.expected_visible_faces = visibility.expected_faces; evidence.covered_visible_faces = visibility.covered_faces; evidence.free_space_violations = visibility.violations; evidence.supported_rays = visibility.supported_rays; evidence.incident_rays = visibility.incident_rays;} evidence.score = normalized_evidence_score(normalized_evidence_features(evidence.support_points, evidence.top_height_error_m, visibility)); CuboidHypothesis result; result.pose = pose; result.evidence = evidence; result.support_height_m = ground.height(bottom); return result; }
 
 inline bool boxes_overlap(const Pose & first, const Pose & second, double shrink = .08)
 {
   Eigen::Vector3d a, b; for (int i = 0; i < 3; ++i) {a[i] = std::max(first.dims[i] / 2. - shrink, 1e-3); b[i] = std::max(second.dims[i] / 2. - shrink, 1e-3);} const Eigen::Vector3d relative = first.rotation.transpose() * (second.position - first.position); const Eigen::Matrix3d coupling = first.rotation.transpose() * second.rotation, absolute = coupling.cwiseAbs().array() + 1e-9; for (int axis = 0; axis < 3; ++axis) {if (std::abs(relative[axis]) > a[axis] + absolute.row(axis).dot(b)) {return false;}} for (int axis = 0; axis < 3; ++axis) {if (std::abs(relative.dot(coupling.col(axis))) > absolute.col(axis).dot(a) + b[axis]) {return false;}} for (int i = 0; i < 3; ++i) {for (int j = 0; j < 3; ++j) {const double ra = a[(i + 1) % 3] * absolute((i + 2) % 3, j) + a[(i + 2) % 3] * absolute((i + 1) % 3, j), rb = b[(j + 1) % 3] * absolute(i, (j + 2) % 3) + b[(j + 2) % 3] * absolute(i, (j + 1) % 3), distance = std::abs(relative[(i + 2) % 3] * coupling((i + 1) % 3, j) - relative[(i + 1) % 3] * coupling((i + 2) % 3, j)); if (distance > ra + rb) {return false;}}} return true;
 }
+inline double hypothesis_selection_score(const CuboidHypothesis & hypothesis)
+{ return hypothesis.evidence.score + hypothesis.prior_match.score; }
+
 inline std::vector<CuboidHypothesis> select_hypotheses(std::vector<CuboidHypothesis> hypotheses, double shrink = .08)
-{ std::sort(hypotheses.begin(), hypotheses.end(), [](const auto & a, const auto & b) {return a.evidence.score == b.evidence.score ? canonical_less(a.pose.position, b.pose.position) : a.evidence.score > b.evidence.score;}); std::vector<CuboidHypothesis> selected; for (const auto & candidate : hypotheses) {bool conflict = false; for (const auto & prior : selected) {if (boxes_overlap(candidate.pose, prior.pose, shrink)) {conflict = true; break;}} if (!conflict) {selected.push_back(candidate);}} return selected; }
+{ std::sort(hypotheses.begin(), hypotheses.end(), [](const auto & a, const auto & b) {const double a_score = hypothesis_selection_score(a), b_score = hypothesis_selection_score(b); return a_score == b_score ? canonical_less(a.pose.position, b.pose.position) : a_score > b_score;}); std::vector<CuboidHypothesis> selected; for (const auto & candidate : hypotheses) {bool conflict = false; for (const auto & prior : selected) {if (boxes_overlap(candidate.pose, prior.pose, shrink)) {conflict = true; break;}} if (!conflict) {selected.push_back(candidate);}} return selected; }
 
 inline double pose_rotation_error_deg(const Pose & first, const Pose & second)
 {
@@ -385,8 +396,8 @@ inline std::vector<CuboidHypothesis> select_conflict_alternatives(
 {
   if (limit < 1U) {throw std::invalid_argument("conflict_alternatives must be at least one");}
   std::sort(hypotheses.begin(), hypotheses.end(), [](const auto & a, const auto & b) {
-    return a.evidence.score == b.evidence.score ? canonical_less(a.pose.position, b.pose.position) :
-           a.evidence.score > b.evidence.score;
+    const double a_score = hypothesis_selection_score(a), b_score = hypothesis_selection_score(b);
+    return a_score == b_score ? canonical_less(a.pose.position, b.pose.position) : a_score > b_score;
   });
   std::vector<std::vector<CuboidHypothesis>> groups;
   for (const auto & candidate : hypotheses) {
