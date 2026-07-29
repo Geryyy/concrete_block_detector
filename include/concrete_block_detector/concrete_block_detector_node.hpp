@@ -1,6 +1,7 @@
 #pragma once
 
 #include "concrete_block_detector/detector_core_proposals.hpp"
+#include "concrete_block_detector/gripper_self_filter.hpp"
 
 #include <geometry_msgs/msg/pose_array.hpp>
 #include <point_cloud_transport/point_cloud_transport.hpp>
@@ -23,6 +24,13 @@
 namespace concrete_block_detector
 {
 
+struct GripperRailConfig
+{
+  std::string frame;
+  detector_core::Point start_local{detector_core::Point::Zero()};
+  detector_core::Point end_local{detector_core::Point::Zero()};
+};
+
 class ConcreteBlockDetectorNode : public rclcpp::Node
 {
 public:
@@ -39,7 +47,8 @@ private:
     std::shared_ptr<concrete_block_world_model_interfaces::srv::DiscoverBlocks::Response> response);
   concrete_block_world_model_interfaces::msg::BlockArray discover(
     const sensor_msgs::msg::PointCloud2 & cloud_world,
-    const detector_core::SensorContext & sensor_context);
+    const detector_core::SensorContext & sensor_context,
+    const std::vector<detector_core::CylinderSegment> & gripper_cylinders);
 
   std::string world_frame_;
   double transform_timeout_s_;
@@ -50,6 +59,10 @@ private:
   std::string discover_service_;
   double cached_cloud_max_age_s_;
   bool refine_enabled_;
+  bool gripper_self_filter_enabled_;
+  bool gripper_self_filter_publish_markers_;
+  double gripper_self_filter_radius_m_;
+  std::vector<GripperRailConfig> gripper_self_filter_rails_;
   detector_core::DetectionParameters detector_parameters_;
 
   point_cloud_transport::Subscriber cloud_sub_;
@@ -62,6 +75,7 @@ private:
   std::condition_variable cached_cloud_cv_;
   sensor_msgs::msg::PointCloud2::SharedPtr cached_cloud_world_;
   std::shared_ptr<detector_core::SensorContext> cached_sensor_context_;
+  std::vector<detector_core::CylinderSegment> cached_gripper_cylinders_;
   tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;
 };

@@ -52,7 +52,7 @@ if(BUILD_TESTING)
     target_link_libraries(${name} Eigen3::Eigen)
   endfunction()
 
-  foreach(name geometry proposals pipeline refine evidence)
+  foreach(name geometry proposals pipeline refine evidence gripper_self_filter)
     add_detector_core_test(test_detector_core_${name})
   endforeach()
 

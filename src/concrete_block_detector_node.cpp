@@ -17,6 +17,7 @@
 #include <limits>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 namespace concrete_block_detector
 {
@@ -42,6 +43,73 @@ visualization_msgs::msg::Marker make_marker(
   marker.color.g = 0.55F;
   marker.color.b = 0.10F;
   marker.color.a = 0.75F;
+  return marker;
+}
+
+detector_core::Point transform_point(
+  const geometry_msgs::msg::TransformStamped & world_from_frame,
+  const detector_core::Point & point_in_frame)
+{
+  const auto & transform = world_from_frame.transform;
+  const Eigen::Quaterniond rotation(
+    transform.rotation.w, transform.rotation.x, transform.rotation.y, transform.rotation.z);
+  return rotation.normalized() * point_in_frame + detector_core::Point(
+    transform.translation.x, transform.translation.y, transform.translation.z);
+}
+
+visualization_msgs::msg::Marker make_gripper_cylinder_marker(
+  const std_msgs::msg::Header & header, const detector_core::CylinderSegment & cylinder, int id)
+{
+  const auto axis = cylinder.end - cylinder.start;
+  const double length = axis.norm();
+  visualization_msgs::msg::Marker marker;
+  marker.header = header;
+  marker.ns = "gripper_self_filter";
+  marker.id = id;
+  marker.type = visualization_msgs::msg::Marker::CYLINDER;
+  marker.action = visualization_msgs::msg::Marker::ADD;
+  const auto midpoint = (cylinder.start + cylinder.end) * 0.5;
+  marker.pose.position.x = midpoint.x();
+  marker.pose.position.y = midpoint.y();
+  marker.pose.position.z = midpoint.z();
+  const Eigen::Quaterniond orientation = Eigen::Quaterniond::FromTwoVectors(Eigen::Vector3d::UnitZ(), axis / length);
+  marker.pose.orientation.x = orientation.x();
+  marker.pose.orientation.y = orientation.y();
+  marker.pose.orientation.z = orientation.z();
+  marker.pose.orientation.w = orientation.w();
+  marker.scale.x = 2.0 * cylinder.radius;
+  marker.scale.y = 2.0 * cylinder.radius;
+  marker.scale.z = length;
+  marker.color.r = 0.10F;
+  marker.color.g = 0.85F;
+  marker.color.b = 1.00F;
+  marker.color.a = 0.30F;
+  return marker;
+}
+
+visualization_msgs::msg::Marker make_gripper_centerlines_marker(
+  const std_msgs::msg::Header & header, const std::vector<detector_core::CylinderSegment> & cylinders)
+{
+  visualization_msgs::msg::Marker marker;
+  marker.header = header;
+  marker.ns = "gripper_self_filter_centerlines";
+  marker.id = 0;
+  marker.type = visualization_msgs::msg::Marker::LINE_LIST;
+  marker.action = visualization_msgs::msg::Marker::ADD;
+  marker.scale.x = 0.025;
+  marker.color.r = 0.0F;
+  marker.color.g = 0.95F;
+  marker.color.b = 1.0F;
+  marker.color.a = 1.0F;
+  marker.points.reserve(cylinders.size() * 2U);
+  for (const auto & cylinder : cylinders) {
+    geometry_msgs::msg::Point start;
+    start.x = cylinder.start.x(); start.y = cylinder.start.y(); start.z = cylinder.start.z();
+    geometry_msgs::msg::Point end;
+    end.x = cylinder.end.x(); end.y = cylinder.end.y(); end.z = cylinder.end.z();
+    marker.points.push_back(start);
+    marker.points.push_back(end);
+  }
   return marker;
 }
 
@@ -106,6 +174,9 @@ ConcreteBlockDetectorNode::ConcreteBlockDetectorNode(const rclcpp::NodeOptions &
   discover_service_(declare_parameter<std::string>("discover_service", "~/discover_blocks")),
   cached_cloud_max_age_s_(declare_parameter<double>("cached_cloud_max_age_s", 2.0)),
   refine_enabled_(declare_parameter<bool>("refine_enabled", true)),
+  gripper_self_filter_enabled_(declare_parameter<bool>("gripper_self_filter.enabled", false)),
+  gripper_self_filter_publish_markers_(declare_parameter<bool>("gripper_self_filter.publish_markers", true)),
+  gripper_self_filter_radius_m_(declare_parameter<double>("gripper_self_filter.radius_m", 0.10)),
   tf_buffer_(get_clock()), tf_listener_(tf_buffer_)
 {
   if (world_frame_.empty() || transform_timeout_s_ < 0.0 || !std::isfinite(cached_cloud_max_age_s_) ||
@@ -165,6 +236,29 @@ ConcreteBlockDetectorNode::ConcreteBlockDetectorNode(const rclcpp::NodeOptions &
   detector_parameters_.refine_huber_scale = declare_parameter<double>("detector.refine_huber_scale", detector_parameters_.refine_huber_scale);
   detector_parameters_.refine_max_translation = declare_parameter<double>("detector.refine_max_translation", detector_parameters_.refine_max_translation);
   detector_parameters_.refine_max_rotation_deg = declare_parameter<double>("detector.refine_max_rotation_deg", detector_parameters_.refine_max_rotation_deg);
+  const auto local_point_parameter = [this](const std::string & name, const std::vector<double> & default_value) {
+      const auto values = declare_parameter<std::vector<double>>(name, default_value);
+      if (values.size() != 3U) {throw std::invalid_argument(name + " must contain three values");}
+      return detector_core::Point(values[0], values[1], values[2]);
+    };
+  for (const std::string & rail : {"left_rail", "right_rail"}) {
+    const std::string prefix = "gripper_self_filter." + rail;
+    GripperRailConfig config;
+    config.frame = declare_parameter<std::string>(prefix + ".frame", "");
+    config.start_local = local_point_parameter(prefix + ".start_local_m", {-0.70, 0.0, 0.0});
+    config.end_local = local_point_parameter(prefix + ".end_local_m", {0.70, 0.0, 0.0});
+    gripper_self_filter_rails_.push_back(std::move(config));
+  }
+  if (gripper_self_filter_enabled_) {
+    if (!std::isfinite(gripper_self_filter_radius_m_) || gripper_self_filter_radius_m_ <= 0.0) {
+      throw std::invalid_argument("gripper_self_filter.radius_m must be finite and positive");
+    }
+    for (const auto & rail : gripper_self_filter_rails_) {
+      if (rail.frame.empty() || (rail.end_local - rail.start_local).squaredNorm() <= 1e-18) {
+        throw std::invalid_argument("enabled gripper self-filter requires non-empty rail frames and non-zero segments");
+      }
+    }
+  }
   cloud_callback_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
   poses_pub_ = create_publisher<geometry_msgs::msg::PoseArray>("poses", 10);
   markers_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>("markers", 10);
@@ -188,6 +282,7 @@ void ConcreteBlockDetectorNode::cloud_callback(const sensor_msgs::msg::PointClou
   if (cloud->header.frame_id.empty()) {RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000, "Ignoring point cloud without a frame_id"); return;}
   sensor_msgs::msg::PointCloud2 world;
   detector_core::SensorContext sensor_context;
+  std::vector<detector_core::CylinderSegment> gripper_cylinders;
   try {
     const auto transform = tf_buffer_.lookupTransform(
       world_frame_, cloud->header.frame_id, cloud->header.stamp,
@@ -195,10 +290,28 @@ void ConcreteBlockDetectorNode::cloud_callback(const sensor_msgs::msg::PointClou
     tf2::doTransform(*cloud, world, transform);
     sensor_context = make_sensor_context(world, transform);
   } catch (const tf2::TransformException & error) {RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000, "Ignoring cloud: no transform %s -> %s at its timestamp: %s", cloud->header.frame_id.c_str(), world_frame_.c_str(), error.what()); return;}
+  if (gripper_self_filter_enabled_) {
+    for (const auto & rail : gripper_self_filter_rails_) {
+      try {
+        const auto world_from_rail = tf_buffer_.lookupTransform(
+          world_frame_, rail.frame, cloud->header.stamp,
+          tf2::durationFromSec(transform_timeout_s_));
+        gripper_cylinders.push_back({
+          transform_point(world_from_rail, rail.start_local),
+          transform_point(world_from_rail, rail.end_local), gripper_self_filter_radius_m_});
+      } catch (const tf2::TransformException & error) {
+        RCLCPP_WARN_THROTTLE(
+          get_logger(), *get_clock(), 5000,
+          "Gripper self-filter skipped rail '%s': no transform %s -> %s at cloud stamp: %s",
+          rail.frame.c_str(), rail.frame.c_str(), world_frame_.c_str(), error.what());
+      }
+    }
+  }
   {
     std::lock_guard<std::mutex> lock(cached_cloud_mutex_);
     cached_cloud_world_ = std::make_shared<sensor_msgs::msg::PointCloud2>(world);
     cached_sensor_context_ = std::make_shared<detector_core::SensorContext>(std::move(sensor_context));
+    cached_gripper_cylinders_ = std::move(gripper_cylinders);
   }
   cached_cloud_cv_.notify_all();
 }
@@ -212,6 +325,7 @@ void ConcreteBlockDetectorNode::handle_discover_blocks(const std::shared_ptr<con
   }
   sensor_msgs::msg::PointCloud2::SharedPtr cloud;
   std::shared_ptr<detector_core::SensorContext> sensor_context;
+  std::vector<detector_core::CylinderSegment> gripper_cylinders;
   const auto cached_cloud_is_current = [this]() {
       if (!cached_cloud_world_ || !cached_sensor_context_) {
         return false;
@@ -232,19 +346,36 @@ void ConcreteBlockDetectorNode::handle_discover_blocks(const std::shared_ptr<con
     }
     cloud = cached_cloud_world_;
     sensor_context = cached_sensor_context_;
+    gripper_cylinders = cached_gripper_cylinders_;
   }
-  try {response->blocks = discover(*cloud, *sensor_context); response->success = true; response->message = "Discovered " + std::to_string(response->blocks.blocks.size()) + " block(s).";} catch (const std::exception & error) {response->success = false; response->message = std::string("Discovery failed: ") + error.what(); RCLCPP_ERROR(get_logger(), "%s", response->message.c_str());}
+  try {
+    response->blocks = discover(*cloud, *sensor_context, gripper_cylinders);
+    response->success = true;
+    response->message = "Discovered " + std::to_string(response->blocks.blocks.size()) + " block(s).";
+  } catch (const std::exception & error) {response->success = false; response->message = std::string("Discovery failed: ") + error.what(); RCLCPP_ERROR(get_logger(), "%s", response->message.c_str());}
 }
 
 concrete_block_world_model_interfaces::msg::BlockArray ConcreteBlockDetectorNode::discover(
   const sensor_msgs::msg::PointCloud2 & cloud_world,
-  const detector_core::SensorContext & sensor_context)
+  const detector_core::SensorContext & sensor_context,
+  const std::vector<detector_core::CylinderSegment> & gripper_cylinders)
 {
   concrete_block_world_model_interfaces::msg::BlockArray result; result.header = cloud_world.header;
   geometry_msgs::msg::PoseArray poses; poses.header = cloud_world.header;
   visualization_msgs::msg::MarkerArray markers; visualization_msgs::msg::Marker clear; clear.header = cloud_world.header; clear.action = visualization_msgs::msg::Marker::DELETEALL; markers.markers.push_back(clear);
   auto points = ros_points(cloud_world);
   if (scene_bounds_enabled_) {points.erase(std::remove_if(points.begin(), points.end(), [this](const auto & point) {return point.x() < scene_bounds_min_m_[0] || point.x() > scene_bounds_max_m_[0] || point.y() < scene_bounds_min_m_[1] || point.y() > scene_bounds_max_m_[1] || point.z() < scene_bounds_min_m_[2] || point.z() > scene_bounds_max_m_[2];}), points.end());}
+  std::size_t gripper_points_removed = 0U;
+  if (!gripper_cylinders.empty()) {
+    points = detector_core::remove_points_inside_cylinders(points, gripper_cylinders, &gripper_points_removed);
+  }
+  if (gripper_self_filter_publish_markers_ && !gripper_cylinders.empty()) {
+    markers.markers.push_back(make_gripper_centerlines_marker(cloud_world.header, gripper_cylinders));
+    int marker_id = 0;
+    for (const auto & cylinder : gripper_cylinders) {
+      markers.markers.push_back(make_gripper_cylinder_marker(cloud_world.header, cylinder, marker_id++));
+    }
+  }
   auto detection = refine_enabled_ ? detector_core::detect(points, detector_parameters_, &sensor_context) :
     detector_core::detect_without_refinement(points, detector_parameters_, &sensor_context);
   int marker_id = 0;
@@ -276,6 +407,9 @@ concrete_block_world_model_interfaces::msg::BlockArray ConcreteBlockDetectorNode
     block.last_seen = cloud_world.header.stamp;
     result.blocks.push_back(std::move(block));
   }
+  RCLCPP_INFO(
+    get_logger(), "Scene discovery input: %zu point(s), gripper self-filter removed %zu point(s) using %zu rail cylinder(s)",
+    points.size() + gripper_points_removed, gripper_points_removed, gripper_cylinders.size());
   poses_pub_->publish(poses); markers_pub_->publish(markers); return result;
 }
 }  // namespace concrete_block_detector

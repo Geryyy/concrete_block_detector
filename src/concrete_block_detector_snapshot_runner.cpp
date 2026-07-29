@@ -1,4 +1,5 @@
 #include "concrete_block_detector/detector_core_pipeline.hpp"
+#include "concrete_block_detector/gripper_self_filter.hpp"
 
 #include <yaml-cpp/yaml.h>
 #include <nlohmann/json.hpp>
@@ -35,6 +36,15 @@ struct RuntimeParameters
   bool scene_bounds_enabled{false};
   std::array<double, 3> scene_bounds_min{};
   std::array<double, 3> scene_bounds_max{};
+  bool gripper_self_filter_enabled{false};
+  double gripper_self_filter_radius_m{0.10};
+  struct GripperRail
+  {
+    std::string frame;
+    Point start_local{Point::Zero()};
+    Point end_local{Point::Zero()};
+  };
+  std::vector<GripperRail> gripper_self_filter_rails;
 };
 
 struct Arguments
@@ -97,6 +107,22 @@ void load_parameters_file(const std::filesystem::path & path, RuntimeParameters 
     assign_if_present(bounds, "enabled", runtime.scene_bounds_enabled);
     if (bounds["min_m"]) {runtime.scene_bounds_min = yaml_vec3(bounds, "min_m");}
     if (bounds["max_m"]) {runtime.scene_bounds_max = yaml_vec3(bounds, "max_m");}
+  }
+  if (const auto filter = parameters["gripper_self_filter"]) {
+    assign_if_present(filter, "enabled", runtime.gripper_self_filter_enabled);
+    assign_if_present(filter, "radius_m", runtime.gripper_self_filter_radius_m);
+    runtime.gripper_self_filter_rails.clear();
+    for (const std::string & rail_name : {"left_rail", "right_rail"}) {
+      const auto rail = filter[rail_name];
+      if (!rail) {continue;}
+      RuntimeParameters::GripperRail parsed;
+      parsed.frame = rail["frame"].as<std::string>();
+      const auto start = yaml_vec3(rail, "start_local_m");
+      const auto end = yaml_vec3(rail, "end_local_m");
+      parsed.start_local = Point(start[0], start[1], start[2]);
+      parsed.end_local = Point(end[0], end[1], end[2]);
+      runtime.gripper_self_filter_rails.push_back(std::move(parsed));
+    }
   }
   const auto detector = parameters["detector"];
   if (!detector) {return;}
@@ -183,25 +209,35 @@ Points load_ascii_xyz_pcd(const std::filesystem::path & path)
   return points;
 }
 
-Eigen::Matrix4d load_world_from_cloud(const std::filesystem::path & path)
+Eigen::Matrix4d load_transform(
+  const std::filesystem::path & path, const std::string & parent, const std::string & child)
 {
   const YAML::Node document = YAML::LoadFile(path.string());
   const auto transforms = document["transforms"];
   if (!transforms || !transforms.IsSequence()) {throw std::invalid_argument("tf.yaml has no transforms sequence: " + path.string());}
   for (const auto & transform : transforms) {
-    if (transform["name"].as<std::string>() != "T_world_seyond") {continue;}
+    if (!transform["parent"] || !transform["child"] ||
+      transform["parent"].as<std::string>() != parent || transform["child"].as<std::string>() != child) {
+      continue;
+    }
     if (transform["available"] && !transform["available"].as<bool>()) {break;}
     const auto matrix = transform["matrix"];
     if (!matrix || !matrix.IsSequence() || matrix.size() != 4U) {break;}
     Eigen::Matrix4d result;
     for (int row = 0; row < 4; ++row) {
-      if (!matrix[row].IsSequence() || matrix[row].size() != 4U) {throw std::invalid_argument("T_world_seyond matrix must be 4x4: " + path.string());}
+      if (!matrix[row].IsSequence() || matrix[row].size() != 4U) {throw std::invalid_argument("TF matrix must be 4x4: " + path.string());}
       for (int column = 0; column < 4; ++column) {result(row, column) = matrix[row][column].as<double>();}
     }
-    if (!result.allFinite()) {throw std::invalid_argument("T_world_seyond contains non-finite values: " + path.string());}
+    if (!result.allFinite()) {throw std::invalid_argument("TF matrix contains non-finite values: " + path.string());}
     return result;
   }
-  throw std::invalid_argument("tf.yaml has no available T_world_seyond transform: " + path.string());
+  throw std::invalid_argument(
+          "tf.yaml has no available transform " + parent + " <- " + child + ": " + path.string());
+}
+
+Eigen::Matrix4d load_world_from_cloud(const std::filesystem::path & path)
+{
+  return load_transform(path, "world", "seyond");
 }
 
 Points transform_points(const Points & sensor_points, const Eigen::Matrix4d & world_from_sensor)
@@ -241,6 +277,35 @@ void apply_scene_bounds(Points & points, const RuntimeParameters & runtime)
       }
       return false;
     }), points.end());
+}
+
+std::vector<detector_core::CylinderSegment> gripper_cylinders_from_snapshot(
+  const std::filesystem::path & tf_path, const RuntimeParameters & runtime,
+  std::vector<std::string> * unavailable_frames)
+{
+  std::vector<detector_core::CylinderSegment> result;
+  if (!runtime.gripper_self_filter_enabled) {return result;}
+  if (!std::isfinite(runtime.gripper_self_filter_radius_m) || runtime.gripper_self_filter_radius_m <= 0.0) {
+    throw std::invalid_argument("gripper_self_filter.radius_m must be finite and positive");
+  }
+  if (runtime.gripper_self_filter_rails.empty()) {
+    throw std::invalid_argument("enabled gripper self-filter requires rail configuration");
+  }
+  for (const auto & rail : runtime.gripper_self_filter_rails) {
+    if (rail.frame.empty() || (rail.end_local - rail.start_local).squaredNorm() <= 1e-18) {
+      throw std::invalid_argument("enabled gripper self-filter requires non-empty rail frames and non-zero segments");
+    }
+    try {
+      const auto world_from_rail = load_transform(tf_path, "world", rail.frame);
+      result.push_back({
+        world_from_rail.topLeftCorner<3, 3>() * rail.start_local + world_from_rail.topRightCorner<3, 1>(),
+        world_from_rail.topLeftCorner<3, 3>() * rail.end_local + world_from_rail.topRightCorner<3, 1>(),
+        runtime.gripper_self_filter_radius_m});
+    } catch (const std::invalid_argument &) {
+      if (unavailable_frames != nullptr) {unavailable_frames->push_back(rail.frame);}
+    }
+  }
+  return result;
 }
 
 json pose_json(const detector_core::CuboidHypothesis & hypothesis)
@@ -371,6 +436,14 @@ json run_snapshot(const std::filesystem::path & snapshot, const RuntimeParameter
   const SensorContext context = sensor_context_from_world_returns(world_returns, origin);
   Points detection_points = world_returns;
   apply_scene_bounds(detection_points, runtime);
+  std::vector<std::string> unavailable_gripper_frames;
+  const auto gripper_cylinders = gripper_cylinders_from_snapshot(
+    snapshot / "tf.yaml", runtime, &unavailable_gripper_frames);
+  std::size_t gripper_points_removed = 0U;
+  if (!gripper_cylinders.empty()) {
+    detection_points = detector_core::remove_points_inside_cylinders(
+      detection_points, gripper_cylinders, &gripper_points_removed);
+  }
   const auto started = std::chrono::steady_clock::now();
   const DetectionResult detection = runtime.refine_enabled ?
     detector_core::detect(detection_points, runtime.detector, &context) :
@@ -402,6 +475,10 @@ json run_snapshot(const std::filesystem::path & snapshot, const RuntimeParameter
     {"sensor_origin_world", {origin.x(), origin.y(), origin.z()}},
     {"refine_enabled", runtime.refine_enabled},
     {"scene_bounds_enabled", runtime.scene_bounds_enabled},
+    {"gripper_self_filter_enabled", runtime.gripper_self_filter_enabled},
+    {"gripper_filter_cylinders", gripper_cylinders.size()},
+    {"gripper_filter_points_removed", gripper_points_removed},
+    {"gripper_filter_unavailable_frames", unavailable_gripper_frames},
     {"runtime_ms", elapsed},
     {"counts", counts_json(detection.counts)},
     {"poses", poses}, {"raw_lineage", raw_lineage},
