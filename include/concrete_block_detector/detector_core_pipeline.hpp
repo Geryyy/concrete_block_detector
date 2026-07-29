@@ -192,6 +192,67 @@ inline DetectionResult detect(
   const VisualScorer * visual_scorer = nullptr)
 {
   DetectionResult result = detect_without_refinement(input, params, sensor_context, priors, visual_scorer);
+  // A prior is allowed to seed refinement only when the current cloud verifies
+  // it with nearby cuboid-surface returns. This recovers gripped/occluded
+  // blocks that never formed a DBSCAN proposal without manufacturing a block.
+  if (priors != nullptr) {
+    for (const auto & prior : *priors) {
+      if (prior.source != "fk" || prior.weight <= 0.0 || prior.dims != params.block_dims) {continue;}
+      CuboidPose seed; seed.position = prior.position; seed.rotation = prior.rotation; seed.dims = prior.dims;
+      // Refine the FK initialization against only the points its surface owns.
+      // Its tolerance is deliberately the configured FK tolerance, rather than
+      // the tighter generic refinement guard: grasp offsets can exceed the
+      // latter, but a seed is retained only after the normal evidence gate.
+      Points support_points = assign_points({seed}, result.above_support_points, params.refine_band).front();
+      if (support_points.size() < params.refine_min_points) {continue;}
+      RefineParameters seed_refine_params;
+      seed_refine_params.huber_scale = params.refine_huber_scale;
+      seed_refine_params.max_translation = prior.translation_tolerance_m;
+      seed_refine_params.max_rotation_deg = std::min(
+        params.refine_max_rotation_deg, prior.orientation_tolerance_rad * 180.0 / M_PI);
+      seed_refine_params.min_points = params.refine_min_points;
+      const auto seed_refined = refine_pose(seed, support_points, seed_refine_params).pose;
+      if (params.refine_preserve_top_axis_if_gravity_worsens) {
+        const Point up = result.ground.normal.normalized();
+        if (std::abs(seed_refined.rotation.col(2).dot(up)) + 1.0e-6 <
+          std::abs(seed.rotation.col(2).dot(up)))
+        {
+          seed.rotation = preserve_top_axis(seed.rotation, seed_refined.rotation);
+        } else {
+          seed.rotation = seed_refined.rotation;
+        }
+      } else {
+        seed.rotation = seed_refined.rotation;
+      }
+      seed.position = seed_refined.position;
+      support_points = assign_points({seed}, result.above_support_points, params.refine_band).front();
+      if (support_points.size() < params.refine_min_points) {continue;}
+      Pose seed_pose; seed_pose.position = seed.position; seed_pose.rotation = seed.rotation; seed_pose.dims = seed.dims;
+      Pose pose; pose.position = seed.position; pose.rotation = seed.rotation; pose.dims = seed.dims;
+      auto hypothesis = make_hypothesis(
+        pose, support_points.size(), result.ground, 0U, sensor_context);
+      if (hypothesis.evidence.score < params.min_score) {continue;}
+      // A seed is recovery for an absent/weak candidate, not a second
+      // competitor that can displace a normal geometry-derived pose merely
+      // through its FK bonus. An overlapping seed must improve geometric
+      // evidence by a configured margin before it can replace that candidate.
+      double best_overlapping_evidence = -std::numeric_limits<double>::infinity();
+      for (const auto & existing : result.hypotheses) {
+        if (boxes_overlap(seed_pose, existing.pose)) {
+          best_overlapping_evidence = std::max(
+            best_overlapping_evidence, existing.evidence.score);
+        }
+      }
+      if (hypothesis.evidence.score < best_overlapping_evidence +
+        params.fk_seed_min_evidence_gain)
+      {
+        continue;
+      }
+      hypothesis.prior_match = best_prior_match(pose.position, pose.rotation, pose.dims, priors);
+      if (visual_scorer != nullptr) {hypothesis.visual_evidence = (*visual_scorer)(pose);}
+      result.hypotheses.push_back(std::move(hypothesis));
+    }
+  }
   if (result.hypotheses.empty()) {return result;}
   std::vector<CuboidPose> initial;
   initial.reserve(result.hypotheses.size());

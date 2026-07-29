@@ -374,6 +374,8 @@ ConcreteBlockDetectorNode::ConcreteBlockDetectorNode(const rclcpp::NodeOptions &
   detector_parameters_.top_plane_angle_deg = declare_parameter<double>("detector.top_plane_angle_deg", detector_parameters_.top_plane_angle_deg);
   detector_parameters_.side_plane_angle_deg = declare_parameter<double>("detector.side_plane_angle_deg", detector_parameters_.side_plane_angle_deg);
   detector_parameters_.min_score = declare_parameter<double>("detector.min_score", detector_parameters_.min_score);
+  detector_parameters_.fk_seed_min_evidence_gain = declare_parameter<double>(
+    "detector.fk_seed_min_evidence_gain", detector_parameters_.fk_seed_min_evidence_gain);
   detector_parameters_.conflict_alternatives = nonnegative_size("detector.conflict_alternatives", detector_parameters_.conflict_alternatives);
   if (detector_parameters_.conflict_alternatives < 1U) {
     throw std::invalid_argument("detector.conflict_alternatives must be at least one");

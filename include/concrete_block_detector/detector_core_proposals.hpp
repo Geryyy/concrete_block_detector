@@ -31,7 +31,7 @@ struct DetectionParameters
   double refine_band{0.10}; std::size_t refine_iterations{2}, refine_min_points{20};
   double refine_huber_scale{0.05}, refine_max_translation{0.15}, refine_max_rotation_deg{20.0};
   bool refine_preserve_top_axis_if_gravity_worsens{false};
-  double min_score{0.0}; std::size_t conflict_alternatives{1}, proposal_max_components{8};
+  double min_score{0.0}, fk_seed_min_evidence_gain{0.15}; std::size_t conflict_alternatives{1}, proposal_max_components{8};
 };
 struct PlanePatch {Point normal{Point::UnitZ()}; Point centroid{Point::Zero()}; Points points; double residual_mad{0.0};};
 struct Pose {Point position{Point::Zero()}; Eigen::Matrix3d rotation{Eigen::Matrix3d::Identity()}; std::array<double, 3> dims{{0.9, 0.6, 0.6}}; double confidence{1.0};};

@@ -7,4 +7,23 @@ TEST(DetectorCorePipeline, VoxelOutputIsCanonicalAndInputOrderIndependent) {Poin
 TEST(DetectorCorePipeline, ComposesGroundProposalPlaneAndSelectionStages) {DetectionParameters params; params.min_inliers = 30; params.ransac_iterations = 600; const auto result = detect_without_refinement(synthetic_block_with_ground(), params); EXPECT_GT(result.counts.downsampled_points, 100U); EXPECT_GT(result.counts.above_support_points, 100U); EXPECT_GE(result.counts.proposal_components, 1U); EXPECT_GT(result.counts.plane_fit_calls, 0U); EXPECT_GE(result.counts.raw_hypotheses, 1U); ASSERT_FALSE(result.poses.empty()); EXPECT_NEAR(result.poses.front().position.z(), .3, .06);}
 TEST(DetectorCorePipeline, PreserveTopAxisRetainsPlaneTiltAndRefinedYaw) {const Eigen::Matrix3d initial = exp_so3(Point(.04, -.03, .20)); const Eigen::Matrix3d refined = exp_so3(Point(.20, -.15, .35)); const Eigen::Matrix3d guarded = preserve_top_axis(initial, refined); EXPECT_NEAR((guarded.col(2) - initial.col(2)).norm(), 0., 1e-12); EXPECT_NEAR(guarded.determinant(), 1., 1e-12); EXPECT_TRUE((guarded.transpose() * guarded).isApprox(Eigen::Matrix3d::Identity(), 1e-12));}
 TEST(DetectorCorePipeline, PosePriorResolvesYawButCannotCreateEvidence) {Pose aligned; aligned.position = Point(1., 2., .3); Pose rotated = aligned; rotated.rotation = Eigen::AngleAxisd(M_PI / 2., Point::UnitZ()).toRotationMatrix(); GroundPlane ground; auto supported = make_hypothesis(aligned, 100U, ground, 2U); auto competing = make_hypothesis(rotated, 100U, ground, 2U); supported.evidence.score = .60; competing.evidence.score = .68; PosePrior prior; prior.source = "fk"; prior.position = aligned.position; prior.rotation = aligned.rotation; prior.weight = .20; PosePriors priors{prior}; supported.prior_match = best_prior_match(supported.pose.position, supported.pose.rotation, supported.pose.dims, &priors); competing.prior_match = best_prior_match(competing.pose.position, competing.pose.rotation, competing.pose.dims, &priors); const auto selected = select_hypotheses({competing, supported}); ASSERT_EQ(selected.size(), 1U); EXPECT_NEAR(selected.front().pose.rotation(0, 0), 1., 1e-12); EXPECT_NEAR(cuboid_orientation_error_rad(aligned.rotation, Eigen::AngleAxisd(M_PI, Point::UnitZ()).toRotationMatrix()), 0., 1e-12); EXPECT_EQ(best_prior_match(Point::Zero(), Eigen::Matrix3d::Identity(), aligned.dims, nullptr).score, 0.0);}
+TEST(DetectorCorePipeline, FkPriorSeedsOnlyCloudSupportedRefinement) {
+  DetectionParameters params;
+  params.cluster_min_size = 1000U;  // Prevent plane-derived proposals.
+  params.refine_min_points = 20;
+  params.refine_band = .06;
+  PosePrior prior;
+  prior.source = "fk";
+  prior.position = Point(0., 0., .3);
+  prior.rotation = Eigen::Matrix3d::Identity();
+  prior.weight = .35;
+  PosePriors priors{prior};
+  const auto seeded = detect(synthetic_block_with_ground(), params, nullptr, &priors);
+  ASSERT_EQ(seeded.hypotheses.size(), 1U);
+  EXPECT_EQ(seeded.hypotheses.front().prior_match.source, "fk");
+  EXPECT_NEAR(seeded.hypotheses.front().pose.position.z(), .3, .06);
+
+  const auto unsupported = detect(synthetic_block_with_ground(), params, nullptr, nullptr);
+  EXPECT_TRUE(unsupported.hypotheses.empty());
+}
 }}  // namespace concrete_block_detector::detector_core

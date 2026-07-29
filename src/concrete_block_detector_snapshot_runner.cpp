@@ -62,6 +62,7 @@ struct Arguments
 {
   std::vector<std::filesystem::path> snapshots;
   std::vector<std::filesystem::path> params_files;
+  bool disable_fk_prior{false};
 };
 
 [[noreturn]] void usage(const std::string & message)
@@ -69,7 +70,7 @@ struct Arguments
   throw std::invalid_argument(
           message + "\nusage: concrete_block_detector_snapshot_runner "
           "--snapshot <snapshot-dir> [--snapshot <snapshot-dir> ...] "
-          "[--params <ros-parameters.yaml> ...]");
+          "[--params <ros-parameters.yaml> ...] [--no-fk-prior]");
 }
 
 Arguments parse_arguments(int argc, char * argv[])
@@ -77,6 +78,10 @@ Arguments parse_arguments(int argc, char * argv[])
   Arguments result;
   for (int index = 1; index < argc; ++index) {
     const std::string argument(argv[index]);
+    if (argument == "--no-fk-prior") {
+      result.disable_fk_prior = true;
+      continue;
+    }
     if (argument == "--snapshot" || argument == "--params") {
       if (++index >= argc) {usage("missing value for " + argument);}
       const std::filesystem::path value(argv[index]);
@@ -188,6 +193,7 @@ void load_parameters_file(const std::filesystem::path & path, RuntimeParameters 
   assign_if_present(detector, "refine_max_rotation_deg", p.refine_max_rotation_deg);
   assign_if_present(detector, "refine_preserve_top_axis_if_gravity_worsens", p.refine_preserve_top_axis_if_gravity_worsens);
   assign_if_present(detector, "min_score", p.min_score);
+  assign_if_present(detector, "fk_seed_min_evidence_gain", p.fk_seed_min_evidence_gain);
   assign_if_present(detector, "conflict_alternatives", p.conflict_alternatives);
   assign_if_present(detector, "proposal_max_components", p.proposal_max_components);
   if (detector["block_dims"]) {p.block_dims = yaml_vec3(detector, "block_dims");}
@@ -600,11 +606,13 @@ int main(int argc, char * argv[])
     const Arguments arguments = parse_arguments(argc, argv);
     RuntimeParameters parameters;
     for (const auto & path : arguments.params_files) {load_parameters_file(path, parameters);}
+    if (arguments.disable_fk_prior) {parameters.fk_prior.weight = 0.0;}
     json output;
     output["schema_version"] = 1;
     output["runner"] = "concrete_block_detector_snapshot_runner";
     output["parameter_files"] = json::array();
     for (const auto & path : arguments.params_files) {output["parameter_files"].push_back(path.string());}
+    output["fk_prior_enabled"] = parameters.fk_prior.weight > 0.0;
     output["snapshots"] = json::array();
     for (const auto & snapshot : arguments.snapshots) {output["snapshots"].push_back(run_snapshot(snapshot, parameters));}
     std::cout << output.dump(2) << '\n';
