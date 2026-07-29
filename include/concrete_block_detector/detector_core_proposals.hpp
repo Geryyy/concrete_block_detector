@@ -193,9 +193,9 @@ inline std::vector<Points> dbscan_label_components(const Points & input, const D
   const Points points = canonical_order(input); const std::size_t count = points.size(); std::vector<int> labels(count, -2); const double radius_sq = params.dbscan_eps * params.dbscan_eps;
   const auto grid = make_spatial_grid(points, params.dbscan_eps);
   const auto neighbors = [&](std::size_t index) {return grid_neighbors(points, grid, index, params.dbscan_eps, radius_sq);};
-  int label = 0;
-  for (std::size_t index = 0; index < count; ++index) {if (labels[index] != -2) {continue;} auto seeds = neighbors(index); if (seeds.size() < params.dbscan_min_points) {labels[index] = -1; continue;} std::vector<char> enqueued(count, false); for (const auto seed : seeds) {enqueued[seed] = true;} labels[index] = label;
-    for (std::size_t cursor = 0; cursor < seeds.size(); ++cursor) {const auto candidate = seeds[cursor]; if (labels[candidate] == -1) {labels[candidate] = label;} if (labels[candidate] != -2) {continue;} labels[candidate] = label; const auto adjacent = neighbors(candidate); if (adjacent.size() >= params.dbscan_min_points) {for (const auto next : adjacent) {if (!enqueued[next]) {seeds.push_back(next); enqueued[next] = true;}}}} ++label;}
+  std::vector<std::size_t> enqueued_generation(count, 0); std::size_t generation = 0; int label = 0;
+  for (std::size_t index = 0; index < count; ++index) {if (labels[index] != -2) {continue;} auto seeds = neighbors(index); if (seeds.size() < params.dbscan_min_points) {labels[index] = -1; continue;} if (++generation == 0U) {std::fill(enqueued_generation.begin(), enqueued_generation.end(), 0); ++generation;} for (const auto seed : seeds) {enqueued_generation[seed] = generation;} labels[index] = label;
+    for (std::size_t cursor = 0; cursor < seeds.size(); ++cursor) {const auto candidate = seeds[cursor]; if (labels[candidate] == -1) {labels[candidate] = label;} if (labels[candidate] != -2) {continue;} labels[candidate] = label; const auto adjacent = neighbors(candidate); if (adjacent.size() >= params.dbscan_min_points) {for (const auto next : adjacent) {if (enqueued_generation[next] != generation) {seeds.push_back(next); enqueued_generation[next] = generation;}}}} ++label;}
   std::vector<Points> components(static_cast<std::size_t>(label)); for (std::size_t i = 0; i < count; ++i) {if (labels[i] >= 0) {components[static_cast<std::size_t>(labels[i])].push_back(points[i]);}}
   return components;
 }
