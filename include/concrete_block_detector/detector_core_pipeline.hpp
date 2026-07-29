@@ -89,9 +89,9 @@ inline DetectionResult detect_without_refinement(
   const Points coarse_ground = voxel_downsample(downsampled, .1);
   const GroundRemovalResult removed = remove_ground(downsampled, ground_params, &coarse_ground); result.ground = removed.ground; result.above_support_points = removed.above_ground; result.counts.above_support_points = removed.above_ground.size();
   if (removed.above_ground.empty()) {return result;}
-  // blockpose keeps the low-clearance cloud for cuboid refinement, but does
-  // not let ground-adjacent returns seed DBSCAN components.  Mixing the two
-  // caused cluttered blocks to choose a different side plane.
+  // Keep the low-clearance cloud for cuboid refinement, but do not let
+  // ground-adjacent returns seed DBSCAN components. Mixing the two causes
+  // cluttered blocks to choose a different side plane.
   Points proposal_seed;
   proposal_seed.reserve(removed.above_ground.size());
   for (const auto & point : removed.above_ground) {

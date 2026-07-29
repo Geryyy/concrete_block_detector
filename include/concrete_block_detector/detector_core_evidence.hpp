@@ -1,6 +1,6 @@
 #pragma once
 
-// Sensor-ray visibility and free-space evidence ported from blockpose.detection.
+// Sensor-ray visibility and free-space evidence for cuboid hypotheses.
 #include "concrete_block_detector/detector_core_geometry.hpp"
 
 #include <Eigen/Core>

@@ -1,6 +1,6 @@
 #pragma once
 
-// Pure Eigen port of blockpose.refine; no ROS or PCL types.
+// Pure Eigen cuboid refinement; no ROS or PCL types.
 #include "concrete_block_detector/detector_core_geometry.hpp"
 
 #include <Eigen/Cholesky>

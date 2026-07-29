@@ -110,9 +110,9 @@ struct CuboidHypothesis {Pose pose; HypothesisEvidence evidence; std::optional<d
 // a search), or the sentinel "not_run" if fit_planes itself was never called.
 struct PlaneFitCounts {std::size_t calls{0}, search_points{0}, full_points_scored{0}, trials_evaluated{0}, valid_trials{0}, leftover_points{0}; std::string stop_reason{"not_run"};};
 
-// Direct port of blockpose._canonicalize_pose.  The swapped horizontal
-// dimensions describe the same physical cuboid; rotate its local frame into
-// the package's canonical 0.9 x 0.6 x 0.6 convention before refinement/NMS.
+// Swapped horizontal dimensions describe the same physical cuboid; rotate its
+// local frame into the package's canonical 0.9 x 0.6 x 0.6 convention before
+// refinement and non-maximum suppression.
 inline Pose canonicalize_pose(Pose pose)
 {
   constexpr double tolerance = 1.0e-9;
@@ -350,11 +350,10 @@ inline std::vector<std::pair<const PlanePatch *, const PlanePatch *>> candidate_
   return output;
 }
 
-// The top-only fallback yaw is the dominant axis of the WORLD-XY footprint,
-// matching blockpose _synthesize_pose_top_only.  Taking it from the scatter
-// projected onto the top plane instead is only equivalent when the fitted
-// normal is exactly world +Z; on a real stacked block whose cluster carries
-// vertical extent the two differed by 34 degrees of yaw.
+// The top-only fallback yaw is the dominant axis of the world-XY footprint.
+// Taking it from the scatter projected onto the top plane is only equivalent
+// when the fitted normal is exactly world +Z; a real stacked-block cluster
+// with vertical extent differed by 34 degrees of yaw.
 inline Pose synthesize_pose(const PlanePatch & top, const PlanePatch * side, const Points & cluster, const std::array<double, 3> & dims)
 {
   Point z = top.normal.normalized(); if (z.z() < 0.0) {z = -z;} Point x; if (side != nullptr) {x = side->normal - side->normal.dot(z) * z; if (x.norm() < 1e-8) {x = Point::UnitX() - Point::UnitX().dot(z) * z;} x.normalize(); if ((centroid(cluster) - side->centroid).dot(x) < 0.0) {x = -x;}} else {Eigen::Vector2d center = Eigen::Vector2d::Zero(); for (const auto & point : cluster) {center += point.head<2>();} if (!cluster.empty()) {center /= static_cast<double>(cluster.size());} Eigen::Matrix2d covariance = Eigen::Matrix2d::Zero(); for (const auto & point : cluster) {const Eigen::Vector2d offset = point.head<2>() - center; covariance.noalias() += offset * offset.transpose();} Eigen::SelfAdjointEigenSolver<Eigen::Matrix2d> solve(covariance); const Eigen::Vector2d dominant = solve.info() == Eigen::Success ? Eigen::Vector2d(solve.eigenvectors().col(1)) : Eigen::Vector2d::UnitX(); x = Point(dominant.x(), dominant.y(), 0.0); if (x.norm() < 1e-8) {x = Point::UnitX();} else {x.normalize();} x -= x.dot(z) * z; if (x.norm() < 1e-8) {x = Point::UnitX() - Point::UnitX().dot(z) * z;} x.normalize();} Point y = z.cross(x).normalized(); Pose pose; pose.rotation.col(0) = x; pose.rotation.col(1) = y; pose.rotation.col(2) = z; pose.position = top.centroid - z * (dims[2] / 2.0); pose.dims = dims; pose.confidence = side == nullptr ? .5 : 1.; if (side != nullptr) {pose.position += x * (dims[0] / 2.0 - (pose.position - side->centroid).dot(x));} return canonicalize_pose(pose);
@@ -377,9 +376,9 @@ inline double pose_rotation_error_deg(const Pose & first, const Pose & second)
   return std::acos(std::clamp((delta.trace() - 1.0) / 2.0, -1.0, 1.0)) * 180.0 / M_PI;
 }
 
-// Direct port of blockpose._select_conflict_alternatives.  Keeping more than
-// one diverse seed per overlap group lets refinement choose between competing
-// closed-form plane fits; the final greedy NMS still returns one pose/group.
+// Keeping more than one diverse seed per overlap group lets refinement choose
+// between competing closed-form plane fits; final greedy NMS returns one pose
+// per group.
 inline std::vector<CuboidHypothesis> select_conflict_alternatives(
   std::vector<CuboidHypothesis> hypotheses, std::size_t limit, double shrink = .08)
 {
