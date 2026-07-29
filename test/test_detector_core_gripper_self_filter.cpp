@@ -7,30 +7,33 @@ namespace concrete_block_detector::detector_core
 namespace
 {
 
-TEST(GripperSelfFilter, RemovesPointsInsideCylinderAndRoundedEndCaps)
+TEST(GripperSelfFilter, RemovesPointsInsideOrientedBox)
 {
-  const CylinderSegment rail{Point(0.0, 0.0, 0.0), Point(1.0, 0.0, 0.0), 0.10};
+  OrientedBox left_box;
+  left_box.center = Point(-0.5, 0.0, 0.5);
+  left_box.size = Point(1.0, 1.0, 1.0);
   const Points input{
-    Point(0.5, 0.05, 0.0),  // inside rail body
-    Point(-0.05, 0.0, 0.0),  // inside start cap
-    Point(1.05, 0.0, 0.0),  // inside end cap
-    Point(0.5, 0.101, 0.0),  // just outside body
-    Point(-0.101, 0.0, 0.0)};  // just outside start cap
+    Point(-0.5, 0.0, 0.5),  // box centre
+    Point(-1.0, 0.0, 0.5),  // box boundary
+    Point(0.01, 0.0, 0.5),  // just outside
+    Point(-0.5, 0.51, 0.5)};  // just outside
   std::size_t removed = 0U;
-  const auto retained = remove_points_inside_cylinders(input, {rail}, &removed);
-  EXPECT_EQ(removed, 3U);
+  const auto retained = remove_points_inside_oriented_boxes(input, {left_box}, &removed);
+  EXPECT_EQ(removed, 2U);
   ASSERT_EQ(retained.size(), 2U);
-  EXPECT_NEAR(retained[0].y(), 0.101, 1e-12);
-  EXPECT_NEAR(retained[1].x(), -0.101, 1e-12);
+  EXPECT_NEAR(retained[0].x(), 0.01, 1e-12);
+  EXPECT_NEAR(retained[1].y(), 0.51, 1e-12);
 }
 
-TEST(GripperSelfFilter, RejectsInvalidCylinder)
+TEST(GripperSelfFilter, RejectsInvalidBox)
 {
   EXPECT_THROW(
-    remove_points_inside_cylinders(Points{}, {CylinderSegment{Point::Zero(), Point::Zero(), 0.1}}),
+    remove_points_inside_oriented_boxes(
+      Points{}, {OrientedBox{Point::Zero(), Eigen::Matrix3d::Identity(), Point::Zero()}}),
     std::invalid_argument);
   EXPECT_THROW(
-    remove_points_inside_cylinders(Points{}, {CylinderSegment{Point::Zero(), Point::UnitX(), 0.0}}),
+    remove_points_inside_oriented_boxes(
+      Points{}, {OrientedBox{Point::Zero(), 2.0 * Eigen::Matrix3d::Identity(), Point::Ones()}}),
     std::invalid_argument);
 }
 

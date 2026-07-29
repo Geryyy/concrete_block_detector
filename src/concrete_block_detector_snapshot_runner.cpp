@@ -37,12 +37,14 @@ struct RuntimeParameters
   std::array<double, 3> scene_bounds_min{};
   std::array<double, 3> scene_bounds_max{};
   bool gripper_self_filter_enabled{false};
-  double gripper_self_filter_radius_m{0.10};
+  double gripper_self_filter_outboard_extent_m{1.50};
+  double gripper_self_filter_cross_rail_extent_m{1.20};
+  double gripper_self_filter_rail_end_margin_m{0.15};
   struct GripperRail
   {
-    std::string frame;
-    Point start_local{Point::Zero()};
-    Point end_local{Point::Zero()};
+    std::string parent_frame;
+    std::string rail_frame;
+    Point outward_axis_local{Point::UnitZ()};
   };
   std::vector<GripperRail> gripper_self_filter_rails;
 };
@@ -110,17 +112,18 @@ void load_parameters_file(const std::filesystem::path & path, RuntimeParameters 
   }
   if (const auto filter = parameters["gripper_self_filter"]) {
     assign_if_present(filter, "enabled", runtime.gripper_self_filter_enabled);
-    assign_if_present(filter, "radius_m", runtime.gripper_self_filter_radius_m);
+    assign_if_present(filter, "outboard_extent_m", runtime.gripper_self_filter_outboard_extent_m);
+    assign_if_present(filter, "cross_rail_extent_m", runtime.gripper_self_filter_cross_rail_extent_m);
+    assign_if_present(filter, "rail_end_margin_m", runtime.gripper_self_filter_rail_end_margin_m);
     runtime.gripper_self_filter_rails.clear();
     for (const std::string & rail_name : {"left_rail", "right_rail"}) {
       const auto rail = filter[rail_name];
       if (!rail) {continue;}
       RuntimeParameters::GripperRail parsed;
-      parsed.frame = rail["frame"].as<std::string>();
-      const auto start = yaml_vec3(rail, "start_local_m");
-      const auto end = yaml_vec3(rail, "end_local_m");
-      parsed.start_local = Point(start[0], start[1], start[2]);
-      parsed.end_local = Point(end[0], end[1], end[2]);
+      parsed.parent_frame = rail["parent_frame"].as<std::string>();
+      parsed.rail_frame = rail["rail_frame"].as<std::string>();
+      const auto outward = yaml_vec3(rail, "outward_axis_local");
+      parsed.outward_axis_local = Point(outward[0], outward[1], outward[2]);
       runtime.gripper_self_filter_rails.push_back(std::move(parsed));
     }
   }
@@ -279,30 +282,55 @@ void apply_scene_bounds(Points & points, const RuntimeParameters & runtime)
     }), points.end());
 }
 
-std::vector<detector_core::CylinderSegment> gripper_cylinders_from_snapshot(
+std::vector<detector_core::OrientedBox> gripper_boxes_from_snapshot(
   const std::filesystem::path & tf_path, const RuntimeParameters & runtime,
   std::vector<std::string> * unavailable_frames)
 {
-  std::vector<detector_core::CylinderSegment> result;
+  std::vector<detector_core::OrientedBox> result;
   if (!runtime.gripper_self_filter_enabled) {return result;}
-  if (!std::isfinite(runtime.gripper_self_filter_radius_m) || runtime.gripper_self_filter_radius_m <= 0.0) {
-    throw std::invalid_argument("gripper_self_filter.radius_m must be finite and positive");
+  if (!std::isfinite(runtime.gripper_self_filter_outboard_extent_m) ||
+    !std::isfinite(runtime.gripper_self_filter_cross_rail_extent_m) ||
+    !std::isfinite(runtime.gripper_self_filter_rail_end_margin_m) ||
+    runtime.gripper_self_filter_outboard_extent_m <= 0.0 ||
+    runtime.gripper_self_filter_cross_rail_extent_m <= 0.0 || runtime.gripper_self_filter_rail_end_margin_m < 0.0) {
+    throw std::invalid_argument("gripper self-filter box extents must be finite and positive");
   }
   if (runtime.gripper_self_filter_rails.empty()) {
     throw std::invalid_argument("enabled gripper self-filter requires rail configuration");
   }
   for (const auto & rail : runtime.gripper_self_filter_rails) {
-    if (rail.frame.empty() || (rail.end_local - rail.start_local).squaredNorm() <= 1e-18) {
-      throw std::invalid_argument("enabled gripper self-filter requires non-empty rail frames and non-zero segments");
+    if (rail.parent_frame.empty() || rail.rail_frame.empty() || rail.outward_axis_local.norm() <= 1e-9) {
+      throw std::invalid_argument("enabled gripper self-filter requires parent, rail, and outward-axis configuration");
     }
     try {
-      const auto world_from_rail = load_transform(tf_path, "world", rail.frame);
+      const auto world_from_parent = load_transform(tf_path, "world", rail.parent_frame);
+      const auto world_from_rail = load_transform(tf_path, "world", rail.rail_frame);
+      const Point rail_start = world_from_parent.topRightCorner<3, 1>();
+      const Point rail_end = world_from_rail.topRightCorner<3, 1>();
+      const Point rail_axis = rail_end - rail_start;
+      const double rail_length = rail_axis.norm();
+      if (rail_length <= 1e-9) {throw std::invalid_argument("gripper rail TF endpoints coincide");}
+      const Point rail_direction = rail_axis / rail_length;
+      Point outward = world_from_parent.topLeftCorner<3, 3>() * rail.outward_axis_local;
+      outward -= rail_direction * outward.dot(rail_direction);
+      const double outward_length = outward.norm();
+      if (outward_length <= 1e-9) {throw std::invalid_argument("gripper outward axis is parallel to rail");}
+      outward /= outward_length;
+      Eigen::Matrix3d rotation;
+      rotation.col(0) = rail_direction;
+      rotation.col(1) = outward;
+      rotation.col(2) = rail_direction.cross(outward).normalized();
       result.push_back({
-        world_from_rail.topLeftCorner<3, 3>() * rail.start_local + world_from_rail.topRightCorner<3, 1>(),
-        world_from_rail.topLeftCorner<3, 3>() * rail.end_local + world_from_rail.topRightCorner<3, 1>(),
-        runtime.gripper_self_filter_radius_m});
+        (rail_start + rail_end) * 0.5 + outward * (runtime.gripper_self_filter_outboard_extent_m * 0.5),
+        rotation,
+        Point(rail_length + 2.0 * runtime.gripper_self_filter_rail_end_margin_m,
+          runtime.gripper_self_filter_outboard_extent_m,
+          runtime.gripper_self_filter_cross_rail_extent_m)});
     } catch (const std::invalid_argument &) {
-      if (unavailable_frames != nullptr) {unavailable_frames->push_back(rail.frame);}
+      if (unavailable_frames != nullptr) {
+        unavailable_frames->push_back(rail.parent_frame);
+        unavailable_frames->push_back(rail.rail_frame);
+      }
     }
   }
   return result;
@@ -437,12 +465,12 @@ json run_snapshot(const std::filesystem::path & snapshot, const RuntimeParameter
   Points detection_points = world_returns;
   apply_scene_bounds(detection_points, runtime);
   std::vector<std::string> unavailable_gripper_frames;
-  const auto gripper_cylinders = gripper_cylinders_from_snapshot(
+  const auto gripper_boxes = gripper_boxes_from_snapshot(
     snapshot / "tf.yaml", runtime, &unavailable_gripper_frames);
   std::size_t gripper_points_removed = 0U;
-  if (!gripper_cylinders.empty()) {
-    detection_points = detector_core::remove_points_inside_cylinders(
-      detection_points, gripper_cylinders, &gripper_points_removed);
+  if (!gripper_boxes.empty()) {
+    detection_points = detector_core::remove_points_inside_oriented_boxes(
+      detection_points, gripper_boxes, &gripper_points_removed);
   }
   const auto started = std::chrono::steady_clock::now();
   const DetectionResult detection = runtime.refine_enabled ?
@@ -476,7 +504,7 @@ json run_snapshot(const std::filesystem::path & snapshot, const RuntimeParameter
     {"refine_enabled", runtime.refine_enabled},
     {"scene_bounds_enabled", runtime.scene_bounds_enabled},
     {"gripper_self_filter_enabled", runtime.gripper_self_filter_enabled},
-    {"gripper_filter_cylinders", gripper_cylinders.size()},
+    {"gripper_filter_boxes", gripper_boxes.size()},
     {"gripper_filter_points_removed", gripper_points_removed},
     {"gripper_filter_unavailable_frames", unavailable_gripper_frames},
     {"runtime_ms", elapsed},

@@ -57,29 +57,34 @@ detector_core::Point transform_point(
     transform.translation.x, transform.translation.y, transform.translation.z);
 }
 
-visualization_msgs::msg::Marker make_gripper_cylinder_marker(
-  const std_msgs::msg::Header & header, const detector_core::CylinderSegment & cylinder, int id)
+detector_core::Point transform_direction(
+  const geometry_msgs::msg::TransformStamped & world_from_frame,
+  const detector_core::Point & direction_in_frame)
 {
-  const auto axis = cylinder.end - cylinder.start;
-  const double length = axis.norm();
+  const auto & rotation = world_from_frame.transform.rotation;
+  return Eigen::Quaterniond(rotation.w, rotation.x, rotation.y, rotation.z).normalized() * direction_in_frame;
+}
+
+visualization_msgs::msg::Marker make_gripper_box_marker(
+  const std_msgs::msg::Header & header, const GripperFilterBox & filter_box, int id)
+{
   visualization_msgs::msg::Marker marker;
   marker.header = header;
   marker.ns = "gripper_self_filter";
   marker.id = id;
-  marker.type = visualization_msgs::msg::Marker::CYLINDER;
+  marker.type = visualization_msgs::msg::Marker::CUBE;
   marker.action = visualization_msgs::msg::Marker::ADD;
-  const auto midpoint = (cylinder.start + cylinder.end) * 0.5;
-  marker.pose.position.x = midpoint.x();
-  marker.pose.position.y = midpoint.y();
-  marker.pose.position.z = midpoint.z();
-  const Eigen::Quaterniond orientation = Eigen::Quaterniond::FromTwoVectors(Eigen::Vector3d::UnitZ(), axis / length);
+  marker.pose.position.x = filter_box.box.center.x();
+  marker.pose.position.y = filter_box.box.center.y();
+  marker.pose.position.z = filter_box.box.center.z();
+  const Eigen::Quaterniond orientation(filter_box.box.rotation);
   marker.pose.orientation.x = orientation.x();
   marker.pose.orientation.y = orientation.y();
   marker.pose.orientation.z = orientation.z();
   marker.pose.orientation.w = orientation.w();
-  marker.scale.x = 2.0 * cylinder.radius;
-  marker.scale.y = 2.0 * cylinder.radius;
-  marker.scale.z = length;
+  marker.scale.x = filter_box.box.size.x();
+  marker.scale.y = filter_box.box.size.y();
+  marker.scale.z = filter_box.box.size.z();
   marker.color.r = 0.10F;
   marker.color.g = 0.85F;
   marker.color.b = 1.00F;
@@ -88,7 +93,7 @@ visualization_msgs::msg::Marker make_gripper_cylinder_marker(
 }
 
 visualization_msgs::msg::Marker make_gripper_centerlines_marker(
-  const std_msgs::msg::Header & header, const std::vector<detector_core::CylinderSegment> & cylinders)
+  const std_msgs::msg::Header & header, const std::vector<GripperFilterBox> & filter_boxes)
 {
   visualization_msgs::msg::Marker marker;
   marker.header = header;
@@ -101,12 +106,42 @@ visualization_msgs::msg::Marker make_gripper_centerlines_marker(
   marker.color.g = 0.95F;
   marker.color.b = 1.0F;
   marker.color.a = 1.0F;
-  marker.points.reserve(cylinders.size() * 2U);
-  for (const auto & cylinder : cylinders) {
+  marker.points.reserve(filter_boxes.size() * 2U);
+  for (const auto & filter_box : filter_boxes) {
     geometry_msgs::msg::Point start;
-    start.x = cylinder.start.x(); start.y = cylinder.start.y(); start.z = cylinder.start.z();
+    start.x = filter_box.rail_start.x(); start.y = filter_box.rail_start.y(); start.z = filter_box.rail_start.z();
     geometry_msgs::msg::Point end;
-    end.x = cylinder.end.x(); end.y = cylinder.end.y(); end.z = cylinder.end.z();
+    end.x = filter_box.rail_end.x(); end.y = filter_box.rail_end.y(); end.z = filter_box.rail_end.z();
+    marker.points.push_back(start);
+    marker.points.push_back(end);
+  }
+  return marker;
+}
+
+visualization_msgs::msg::Marker make_gripper_outward_arrows_marker(
+  const std_msgs::msg::Header & header, const std::vector<GripperFilterBox> & filter_boxes)
+{
+  visualization_msgs::msg::Marker marker;
+  marker.header = header;
+  marker.ns = "gripper_self_filter_outward";
+  marker.id = 0;
+  marker.type = visualization_msgs::msg::Marker::ARROW;
+  marker.action = visualization_msgs::msg::Marker::ADD;
+  marker.scale.x = 0.035;
+  marker.scale.y = 0.090;
+  marker.scale.z = 0.120;
+  marker.color.r = 1.0F;
+  marker.color.g = 0.85F;
+  marker.color.b = 0.0F;
+  marker.color.a = 1.0F;
+  marker.points.reserve(filter_boxes.size() * 2U);
+  for (const auto & filter_box : filter_boxes) {
+    const auto midpoint = (filter_box.rail_start + filter_box.rail_end) * 0.5;
+    geometry_msgs::msg::Point start;
+    start.x = midpoint.x(); start.y = midpoint.y(); start.z = midpoint.z();
+    const auto end_point = midpoint + filter_box.outward_normal * 0.35;
+    geometry_msgs::msg::Point end;
+    end.x = end_point.x(); end.y = end_point.y(); end.z = end_point.z();
     marker.points.push_back(start);
     marker.points.push_back(end);
   }
@@ -176,7 +211,9 @@ ConcreteBlockDetectorNode::ConcreteBlockDetectorNode(const rclcpp::NodeOptions &
   refine_enabled_(declare_parameter<bool>("refine_enabled", true)),
   gripper_self_filter_enabled_(declare_parameter<bool>("gripper_self_filter.enabled", false)),
   gripper_self_filter_publish_markers_(declare_parameter<bool>("gripper_self_filter.publish_markers", true)),
-  gripper_self_filter_radius_m_(declare_parameter<double>("gripper_self_filter.radius_m", 0.10)),
+  gripper_self_filter_outboard_extent_m_(declare_parameter<double>("gripper_self_filter.outboard_extent_m", 1.50)),
+  gripper_self_filter_cross_rail_extent_m_(declare_parameter<double>("gripper_self_filter.cross_rail_extent_m", 1.20)),
+  gripper_self_filter_rail_end_margin_m_(declare_parameter<double>("gripper_self_filter.rail_end_margin_m", 0.15)),
   tf_buffer_(get_clock()), tf_listener_(tf_buffer_)
 {
   if (world_frame_.empty() || transform_timeout_s_ < 0.0 || !std::isfinite(cached_cloud_max_age_s_) ||
@@ -243,19 +280,23 @@ ConcreteBlockDetectorNode::ConcreteBlockDetectorNode(const rclcpp::NodeOptions &
     };
   for (const std::string & rail : {"left_rail", "right_rail"}) {
     const std::string prefix = "gripper_self_filter." + rail;
-    GripperRailConfig config;
-    config.frame = declare_parameter<std::string>(prefix + ".frame", "");
-    config.start_local = local_point_parameter(prefix + ".start_local_m", {-0.70, 0.0, 0.0});
-    config.end_local = local_point_parameter(prefix + ".end_local_m", {0.70, 0.0, 0.0});
+    GripperRailBoxConfig config;
+    config.parent_frame = declare_parameter<std::string>(prefix + ".parent_frame", "");
+    config.rail_frame = declare_parameter<std::string>(prefix + ".rail_frame", "");
+    config.outward_axis_local = local_point_parameter(prefix + ".outward_axis_local", {0.0, 0.0, 1.0});
     gripper_self_filter_rails_.push_back(std::move(config));
   }
   if (gripper_self_filter_enabled_) {
-    if (!std::isfinite(gripper_self_filter_radius_m_) || gripper_self_filter_radius_m_ <= 0.0) {
-      throw std::invalid_argument("gripper_self_filter.radius_m must be finite and positive");
+    if (!std::isfinite(gripper_self_filter_outboard_extent_m_) ||
+      !std::isfinite(gripper_self_filter_cross_rail_extent_m_) ||
+      !std::isfinite(gripper_self_filter_rail_end_margin_m_) ||
+      gripper_self_filter_outboard_extent_m_ <= 0.0 ||
+      gripper_self_filter_cross_rail_extent_m_ <= 0.0 || gripper_self_filter_rail_end_margin_m_ < 0.0) {
+      throw std::invalid_argument("gripper self-filter box extents must be finite and positive");
     }
     for (const auto & rail : gripper_self_filter_rails_) {
-      if (rail.frame.empty() || (rail.end_local - rail.start_local).squaredNorm() <= 1e-18) {
-        throw std::invalid_argument("enabled gripper self-filter requires non-empty rail frames and non-zero segments");
+      if (rail.parent_frame.empty() || rail.rail_frame.empty() || rail.outward_axis_local.norm() <= 1e-9) {
+        throw std::invalid_argument("enabled gripper self-filter requires parent, rail, and outward-axis configuration");
       }
     }
   }
@@ -282,7 +323,7 @@ void ConcreteBlockDetectorNode::cloud_callback(const sensor_msgs::msg::PointClou
   if (cloud->header.frame_id.empty()) {RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000, "Ignoring point cloud without a frame_id"); return;}
   sensor_msgs::msg::PointCloud2 world;
   detector_core::SensorContext sensor_context;
-  std::vector<detector_core::CylinderSegment> gripper_cylinders;
+  std::vector<GripperFilterBox> gripper_boxes;
   try {
     const auto transform = tf_buffer_.lookupTransform(
       world_frame_, cloud->header.frame_id, cloud->header.stamp,
@@ -293,17 +334,43 @@ void ConcreteBlockDetectorNode::cloud_callback(const sensor_msgs::msg::PointClou
   if (gripper_self_filter_enabled_) {
     for (const auto & rail : gripper_self_filter_rails_) {
       try {
-        const auto world_from_rail = tf_buffer_.lookupTransform(
-          world_frame_, rail.frame, cloud->header.stamp,
+        const auto world_from_parent = tf_buffer_.lookupTransform(
+          world_frame_, rail.parent_frame, cloud->header.stamp,
           tf2::durationFromSec(transform_timeout_s_));
-        gripper_cylinders.push_back({
-          transform_point(world_from_rail, rail.start_local),
-          transform_point(world_from_rail, rail.end_local), gripper_self_filter_radius_m_});
+        const auto world_from_rail = tf_buffer_.lookupTransform(
+          world_frame_, rail.rail_frame, cloud->header.stamp,
+          tf2::durationFromSec(transform_timeout_s_));
+        const auto rail_start = transform_point(world_from_parent, detector_core::Point::Zero());
+        const auto rail_end = transform_point(world_from_rail, detector_core::Point::Zero());
+        const auto rail_axis = rail_end - rail_start;
+        const double rail_length = rail_axis.norm();
+        if (rail_length <= 1e-9) {throw std::invalid_argument("gripper rail TF endpoints coincide");}
+        const auto rail_direction = rail_axis / rail_length;
+        auto outward = transform_direction(world_from_parent, rail.outward_axis_local);
+        outward -= rail_direction * outward.dot(rail_direction);
+        const double outward_length = outward.norm();
+        if (outward_length <= 1e-9) {throw std::invalid_argument("gripper outward axis is parallel to rail");}
+        outward /= outward_length;
+        const auto cross_rail = rail_direction.cross(outward).normalized();
+        Eigen::Matrix3d rotation;
+        rotation.col(0) = rail_direction;
+        rotation.col(1) = outward;
+        rotation.col(2) = cross_rail;
+        GripperFilterBox filter_box;
+        filter_box.rail_start = rail_start;
+        filter_box.rail_end = rail_end;
+        filter_box.outward_normal = outward;
+        filter_box.box.center = (rail_start + rail_end) * 0.5 + outward * (gripper_self_filter_outboard_extent_m_ * 0.5);
+        filter_box.box.rotation = rotation;
+        filter_box.box.size = detector_core::Point(
+          rail_length + 2.0 * gripper_self_filter_rail_end_margin_m_,
+          gripper_self_filter_outboard_extent_m_, gripper_self_filter_cross_rail_extent_m_);
+        gripper_boxes.push_back(std::move(filter_box));
       } catch (const tf2::TransformException & error) {
         RCLCPP_WARN_THROTTLE(
           get_logger(), *get_clock(), 5000,
-          "Gripper self-filter skipped rail '%s': no transform %s -> %s at cloud stamp: %s",
-          rail.frame.c_str(), rail.frame.c_str(), world_frame_.c_str(), error.what());
+          "Gripper self-filter skipped rail '%s' -> '%s': no world TF at cloud stamp: %s",
+          rail.parent_frame.c_str(), rail.rail_frame.c_str(), error.what());
       }
     }
   }
@@ -311,7 +378,7 @@ void ConcreteBlockDetectorNode::cloud_callback(const sensor_msgs::msg::PointClou
     std::lock_guard<std::mutex> lock(cached_cloud_mutex_);
     cached_cloud_world_ = std::make_shared<sensor_msgs::msg::PointCloud2>(world);
     cached_sensor_context_ = std::make_shared<detector_core::SensorContext>(std::move(sensor_context));
-    cached_gripper_cylinders_ = std::move(gripper_cylinders);
+    cached_gripper_boxes_ = std::move(gripper_boxes);
   }
   cached_cloud_cv_.notify_all();
 }
@@ -325,7 +392,7 @@ void ConcreteBlockDetectorNode::handle_discover_blocks(const std::shared_ptr<con
   }
   sensor_msgs::msg::PointCloud2::SharedPtr cloud;
   std::shared_ptr<detector_core::SensorContext> sensor_context;
-  std::vector<detector_core::CylinderSegment> gripper_cylinders;
+  std::vector<GripperFilterBox> gripper_boxes;
   const auto cached_cloud_is_current = [this]() {
       if (!cached_cloud_world_ || !cached_sensor_context_) {
         return false;
@@ -346,10 +413,10 @@ void ConcreteBlockDetectorNode::handle_discover_blocks(const std::shared_ptr<con
     }
     cloud = cached_cloud_world_;
     sensor_context = cached_sensor_context_;
-    gripper_cylinders = cached_gripper_cylinders_;
+    gripper_boxes = cached_gripper_boxes_;
   }
   try {
-    response->blocks = discover(*cloud, *sensor_context, gripper_cylinders);
+    response->blocks = discover(*cloud, *sensor_context, gripper_boxes);
     response->success = true;
     response->message = "Discovered " + std::to_string(response->blocks.blocks.size()) + " block(s).";
   } catch (const std::exception & error) {response->success = false; response->message = std::string("Discovery failed: ") + error.what(); RCLCPP_ERROR(get_logger(), "%s", response->message.c_str());}
@@ -358,7 +425,7 @@ void ConcreteBlockDetectorNode::handle_discover_blocks(const std::shared_ptr<con
 concrete_block_world_model_interfaces::msg::BlockArray ConcreteBlockDetectorNode::discover(
   const sensor_msgs::msg::PointCloud2 & cloud_world,
   const detector_core::SensorContext & sensor_context,
-  const std::vector<detector_core::CylinderSegment> & gripper_cylinders)
+  const std::vector<GripperFilterBox> & gripper_boxes)
 {
   concrete_block_world_model_interfaces::msg::BlockArray result; result.header = cloud_world.header;
   geometry_msgs::msg::PoseArray poses; poses.header = cloud_world.header;
@@ -366,14 +433,18 @@ concrete_block_world_model_interfaces::msg::BlockArray ConcreteBlockDetectorNode
   auto points = ros_points(cloud_world);
   if (scene_bounds_enabled_) {points.erase(std::remove_if(points.begin(), points.end(), [this](const auto & point) {return point.x() < scene_bounds_min_m_[0] || point.x() > scene_bounds_max_m_[0] || point.y() < scene_bounds_min_m_[1] || point.y() > scene_bounds_max_m_[1] || point.z() < scene_bounds_min_m_[2] || point.z() > scene_bounds_max_m_[2];}), points.end());}
   std::size_t gripper_points_removed = 0U;
-  if (!gripper_cylinders.empty()) {
-    points = detector_core::remove_points_inside_cylinders(points, gripper_cylinders, &gripper_points_removed);
+  if (!gripper_boxes.empty()) {
+    std::vector<detector_core::OrientedBox> boxes;
+    boxes.reserve(gripper_boxes.size());
+    for (const auto & filter_box : gripper_boxes) {boxes.push_back(filter_box.box);}
+    points = detector_core::remove_points_inside_oriented_boxes(points, boxes, &gripper_points_removed);
   }
-  if (gripper_self_filter_publish_markers_ && !gripper_cylinders.empty()) {
-    markers.markers.push_back(make_gripper_centerlines_marker(cloud_world.header, gripper_cylinders));
+  if (gripper_self_filter_publish_markers_ && !gripper_boxes.empty()) {
+    markers.markers.push_back(make_gripper_centerlines_marker(cloud_world.header, gripper_boxes));
+    markers.markers.push_back(make_gripper_outward_arrows_marker(cloud_world.header, gripper_boxes));
     int marker_id = 0;
-    for (const auto & cylinder : gripper_cylinders) {
-      markers.markers.push_back(make_gripper_cylinder_marker(cloud_world.header, cylinder, marker_id++));
+    for (const auto & filter_box : gripper_boxes) {
+      markers.markers.push_back(make_gripper_box_marker(cloud_world.header, filter_box, marker_id++));
     }
   }
   auto detection = refine_enabled_ ? detector_core::detect(points, detector_parameters_, &sensor_context) :
@@ -408,8 +479,8 @@ concrete_block_world_model_interfaces::msg::BlockArray ConcreteBlockDetectorNode
     result.blocks.push_back(std::move(block));
   }
   RCLCPP_INFO(
-    get_logger(), "Scene discovery input: %zu point(s), gripper self-filter removed %zu point(s) using %zu rail cylinder(s)",
-    points.size() + gripper_points_removed, gripper_points_removed, gripper_cylinders.size());
+    get_logger(), "Scene discovery input: %zu point(s), gripper self-filter removed %zu point(s) using %zu rail box(es)",
+    points.size() + gripper_points_removed, gripper_points_removed, gripper_boxes.size());
   poses_pub_->publish(poses); markers_pub_->publish(markers); return result;
 }
 }  // namespace concrete_block_detector

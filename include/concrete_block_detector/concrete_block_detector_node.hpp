@@ -24,11 +24,19 @@
 namespace concrete_block_detector
 {
 
-struct GripperRailConfig
+struct GripperRailBoxConfig
 {
-  std::string frame;
-  detector_core::Point start_local{detector_core::Point::Zero()};
-  detector_core::Point end_local{detector_core::Point::Zero()};
+  std::string parent_frame;
+  std::string rail_frame;
+  detector_core::Point outward_axis_local{detector_core::Point::UnitZ()};
+};
+
+struct GripperFilterBox
+{
+  detector_core::OrientedBox box;
+  detector_core::Point rail_start{detector_core::Point::Zero()};
+  detector_core::Point rail_end{detector_core::Point::Zero()};
+  detector_core::Point outward_normal{detector_core::Point::UnitZ()};
 };
 
 class ConcreteBlockDetectorNode : public rclcpp::Node
@@ -48,7 +56,7 @@ private:
   concrete_block_world_model_interfaces::msg::BlockArray discover(
     const sensor_msgs::msg::PointCloud2 & cloud_world,
     const detector_core::SensorContext & sensor_context,
-    const std::vector<detector_core::CylinderSegment> & gripper_cylinders);
+    const std::vector<GripperFilterBox> & gripper_boxes);
 
   std::string world_frame_;
   double transform_timeout_s_;
@@ -61,8 +69,10 @@ private:
   bool refine_enabled_;
   bool gripper_self_filter_enabled_;
   bool gripper_self_filter_publish_markers_;
-  double gripper_self_filter_radius_m_;
-  std::vector<GripperRailConfig> gripper_self_filter_rails_;
+  double gripper_self_filter_outboard_extent_m_;
+  double gripper_self_filter_cross_rail_extent_m_;
+  double gripper_self_filter_rail_end_margin_m_;
+  std::vector<GripperRailBoxConfig> gripper_self_filter_rails_;
   detector_core::DetectionParameters detector_parameters_;
 
   point_cloud_transport::Subscriber cloud_sub_;
@@ -75,7 +85,7 @@ private:
   std::condition_variable cached_cloud_cv_;
   sensor_msgs::msg::PointCloud2::SharedPtr cached_cloud_world_;
   std::shared_ptr<detector_core::SensorContext> cached_sensor_context_;
-  std::vector<detector_core::CylinderSegment> cached_gripper_cylinders_;
+  std::vector<GripperFilterBox> cached_gripper_boxes_;
   tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;
 };

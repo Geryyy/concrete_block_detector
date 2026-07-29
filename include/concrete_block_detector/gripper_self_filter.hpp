@@ -1,8 +1,8 @@
 #pragma once
 
-// Small, deterministic point self-filter.  It deliberately stays in the
-// detector core rather than converting a cloud to and from PCL just to test
-// distance to the two gripper rails.
+// Small, deterministic point self-filter. It deliberately stays in the
+// detector core rather than converting a cloud to and from PCL just to apply
+// the two FK-defined gripper exclusion boxes.
 #include "concrete_block_detector/detector_core_geometry.hpp"
 
 #include <algorithm>
@@ -13,44 +13,45 @@
 namespace concrete_block_detector::detector_core
 {
 
-struct CylinderSegment
+struct OrientedBox
 {
-  Point start{Point::Zero()};
-  Point end{Point::Zero()};
-  double radius{0.0};
+  Point center{Point::Zero()};
+  Eigen::Matrix3d rotation{Eigen::Matrix3d::Identity()};
+  Point size{Point::Zero()};
 };
 
-inline double squared_distance_to_segment(const Point & point, const CylinderSegment & segment)
+inline void validate_oriented_box(const OrientedBox & box)
 {
-  const Point axis = segment.end - segment.start;
-  const double axis_squared = axis.squaredNorm();
-  if (!std::isfinite(axis_squared) || axis_squared <= 1e-18) {
-    throw std::invalid_argument("cylinder segment must have a non-zero length");
+  if (!box.center.allFinite() || !box.rotation.allFinite() || !box.size.allFinite() ||
+    box.size.x() <= 0.0 || box.size.y() <= 0.0 || box.size.z() <= 0.0) {
+    throw std::invalid_argument("oriented box center, rotation, and positive size must be finite");
   }
-  const double fraction = std::clamp((point - segment.start).dot(axis) / axis_squared, 0.0, 1.0);
-  return (point - (segment.start + fraction * axis)).squaredNorm();
+  if (!box.rotation.transpose().isApprox(box.rotation.inverse(), 1e-6) ||
+    std::abs(box.rotation.determinant() - 1.0) > 1e-6) {
+    throw std::invalid_argument("oriented box rotation must be orthonormal");
+  }
 }
 
-inline Points remove_points_inside_cylinders(
-  const Points & input, const std::vector<CylinderSegment> & cylinders,
+inline bool point_inside_oriented_box(const Point & point, const OrientedBox & box)
+{
+  const Point local = box.rotation.transpose() * (point - box.center);
+  return (local.array().abs() <= (box.size * 0.5).array()).all();
+}
+
+inline Points remove_points_inside_oriented_boxes(
+  const Points & input, const std::vector<OrientedBox> & boxes,
   std::size_t * removed_count = nullptr)
 {
-  for (const auto & cylinder : cylinders) {
-    if (!std::isfinite(cylinder.radius) || cylinder.radius <= 0.0) {
-      throw std::invalid_argument("cylinder radius must be finite and positive");
-    }
-    (void)squared_distance_to_segment(cylinder.start, cylinder);
-  }
+  for (const auto & box : boxes) {validate_oriented_box(box);}
 
   Points output;
   output.reserve(input.size());
   std::size_t removed = 0U;
   for (const auto & point : input) {
-    const bool inside = std::any_of(
-      cylinders.begin(), cylinders.end(), [&point](const auto & cylinder) {
-        return squared_distance_to_segment(point, cylinder) <= cylinder.radius * cylinder.radius;
+    const bool filtered = std::any_of(boxes.begin(), boxes.end(), [&point](const auto & box) {
+        return point_inside_oriented_box(point, box);
       });
-    if (inside) {
+    if (filtered) {
       ++removed;
     } else {
       output.push_back(point);
