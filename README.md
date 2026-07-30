@@ -137,3 +137,13 @@ The node ignores clouds without a valid TF transform to `world` at their input
 timestamp. An explicit discovery with no detections publishes an empty pose
 array and `DELETEALL` marker. It fits cuboid poses from the cloud but does not
 infer missing blocks or update world-model state.
+# Blockpose core dependency
+
+`concrete_block_detector` consumes the portable, Eigen-only `blockpose_core`
+CMake package. Configure with its installed prefix on `CMAKE_PREFIX_PATH`; no
+source-tree include path is supported:
+
+```bash
+colcon build --packages-select concrete_block_detector \
+  --cmake-args -DCMAKE_PREFIX_PATH=/path/to/blockpose-core-install
+```

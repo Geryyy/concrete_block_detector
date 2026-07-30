@@ -353,13 +353,6 @@ Eigen::Matrix4d load_world_from_cloud(const std::filesystem::path & path)
   return load_transform(path, "world", "seyond");
 }
 
-Eigen::Matrix3d rotation_from_rpy(const Point & rpy)
-{
-  return Eigen::AngleAxisd(rpy.z(), Point::UnitZ()).toRotationMatrix() *
-         Eigen::AngleAxisd(rpy.y(), Point::UnitY()).toRotationMatrix() *
-         Eigen::AngleAxisd(rpy.x(), Point::UnitX()).toRotationMatrix();
-}
-
 detector_core::PosePriors fk_prior_from_snapshot(
   const std::filesystem::path & tf_path, const RuntimeParameters & runtime,
   std::vector<std::string> * unavailable_frames)
@@ -382,7 +375,7 @@ detector_core::PosePriors fk_prior_from_snapshot(
     prior.position = world_from_tcp.topLeftCorner<3, 3>() *
       runtime.fk_prior.tcp_to_block_xyz + world_from_tcp.topRightCorner<3, 1>();
     prior.rotation = world_from_tcp.topLeftCorner<3, 3>() *
-      rotation_from_rpy(runtime.fk_prior.tcp_to_block_rpy);
+      detector_core::rotation_from_rpy(runtime.fk_prior.tcp_to_block_rpy);
     prior.dims = runtime.detector.block_dims;
     prior.weight = runtime.fk_prior.weight;
     prior.translation_tolerance_m = runtime.fk_prior.translation_tolerance_m;

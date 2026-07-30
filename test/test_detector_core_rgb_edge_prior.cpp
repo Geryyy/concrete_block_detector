@@ -1,21 +1,22 @@
-#include "concrete_block_detector/rgb_edge_prior.hpp"
+#include <blockpose/vision/rgb_edge_prior.hpp>
 
 #include <gtest/gtest.h>
+#include <opencv2/imgproc.hpp>
 
-namespace concrete_block_detector
+namespace blockpose::vision
 {
 namespace
 {
-detector_core::Pose pose(double yaw = 0.0)
+core::Pose pose(double yaw = 0.0)
 {
-  detector_core::Pose value;
-  value.position = detector_core::Point(0.0, 0.0, 5.0);
+  core::Pose value;
+  value.position = core::Point(0.0, 0.0, 5.0);
   value.rotation = Eigen::AngleAxisd(yaw, Eigen::Vector3d::UnitZ()).toRotationMatrix();
   value.dims = {{1.4, 0.6, 0.6}};
   return value;
 }
 
-cv::Mat wireframe(const detector_core::Pose & value, const cv::Matx33d & camera)
+cv::Mat wireframe(const core::Pose & value, const cv::Matx33d & camera)
 {
   cv::Mat image = cv::Mat::zeros(120, 160, CV_8UC1);
   const std::array<std::array<int, 3>, 8> signs{{{{-1, -1, -1}}, {{-1, -1, 1}}, {{-1, 1, -1}}, {{-1, 1, 1}}, {{1, -1, -1}}, {{1, -1, 1}}, {{1, 1, -1}}, {{1, 1, 1}}}};
@@ -43,4 +44,4 @@ TEST(RgbEdgePrior, CorrectProjectionBeatsYawSibling)
   ASSERT_TRUE(correct.available); ASSERT_TRUE(wrong.available);
   EXPECT_GT(correct.score, wrong.score);
 }
-}  // namespace concrete_block_detector
+}  // namespace blockpose::vision

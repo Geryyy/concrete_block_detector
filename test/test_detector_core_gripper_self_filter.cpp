@@ -1,8 +1,8 @@
-#include "concrete_block_detector/gripper_self_filter.hpp"
+#include <blockpose/core/gripper_self_filter.hpp>
 
 #include <gtest/gtest.h>
 
-namespace concrete_block_detector::detector_core
+namespace blockpose::core
 {
 namespace
 {
@@ -38,4 +38,4 @@ TEST(GripperSelfFilter, RejectsInvalidBox)
 }
 
 }  // namespace
-}  // namespace concrete_block_detector::detector_core
+}  // namespace blockpose::core

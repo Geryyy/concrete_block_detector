@@ -1,8 +1,8 @@
-#include "concrete_block_detector/detector_core_geometry.hpp"
+#include <blockpose/core/geometry.hpp>
 #include <gtest/gtest.h>
 #include <algorithm>
 #include <cmath>
-namespace concrete_block_detector::detector_core { namespace {
+namespace blockpose::core { namespace {
 Points plane_points() {Points p; for (int x=-5;x<=5;++x) for (int y=-5;y<=5;++y) p.emplace_back(x*.1,y*.1,0.); p.emplace_back(3.,2.,1.); return p;}
 TEST(Geometry, SamplerIsRepeatableAndBounded) {DeterministicSampler first(42U), second(42U); for (std::size_t i=0;i<64U;++i) {const auto a=first.index(121U), b=second.index(121U); EXPECT_EQ(a,b); EXPECT_LT(a,121U);}}
 TEST(Geometry, RansacIsDeterministicAndRefitsFullConsensus) {const auto p=plane_points(); RansacParameters params; params.distance_threshold=.001; params.num_iterations=300; params.seed=42; const auto first=segment_plane(p,params); auto shuffled=p; std::reverse(shuffled.begin(),shuffled.end()); const auto second=segment_plane(shuffled,params); EXPECT_NEAR(std::abs(first.plane.normal.z()),1.,1e-12); EXPECT_NEAR(first.plane.offset,0.,1e-12); EXPECT_EQ(first.inlier_indices.size(),121U); EXPECT_EQ(first.inlier_indices,second.inlier_indices); EXPECT_EQ(first.diagnostics.trials_evaluated,second.diagnostics.trials_evaluated);}

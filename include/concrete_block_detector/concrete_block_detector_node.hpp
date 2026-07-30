@@ -1,7 +1,8 @@
 #pragma once
 
-#include "concrete_block_detector/detector_core_proposals.hpp"
+#include "concrete_block_detector/detector_core_pipeline.hpp"
 #include "concrete_block_detector/gripper_self_filter.hpp"
+#include "concrete_block_detector/rgb_edge_prior.hpp"
 
 #include <geometry_msgs/msg/pose_array.hpp>
 #include <point_cloud_transport/point_cloud_transport.hpp>
@@ -19,8 +20,10 @@
 #include <array>
 #include <condition_variable>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -67,6 +70,19 @@ struct RgbEdgePriorConfig
   int max_image_dimension_px{768};
 };
 
+// What compute_rgb_prior resolved: the scorer discover() feeds into
+// detect()/detect_without_refinement(), plus the gate outcome discover()
+// needs for its debug diagnostics. The scorer may close over the caller's
+// rgb_prior storage (see compute_rgb_prior's doc comment) -- it must not
+// outlive that storage.
+struct RgbPriorOutcome
+{
+  detector_core::VisualScorer visual_scorer;
+  bool rgb_edge_available{false};
+  double rgb_sync_delta_s{std::numeric_limits<double>::infinity()};
+  std::string rgb_gate_reason;
+};
+
 // Request-scoped outlets. They describe the detector's own decisions and are
 // deliberately separate from the world-model's human-facing final overlay.
 struct DetectorDebugConfig
@@ -102,6 +118,43 @@ private:
     std::size_t request_prior_count,
     const sensor_msgs::msg::Image::ConstSharedPtr & rgb,
     const sensor_msgs::msg::CameraInfo::ConstSharedPtr & camera_info);
+
+  // discover()'s stages, in the order discover() runs them. Each is pure
+  // plumbing over its arguments and this node's config/publishers -- none of
+  // them touch the geometric/refinement algorithm itself.
+
+  // Scene bounds, the gripper self-filter, and the debug input/geometry
+  // clouds. Appends the primary-output gripper/prior markers to `markers`
+  // (they depend only on gripper_boxes/priors, not on detection).
+  detector_core::Points filter_scene_points(
+    const sensor_msgs::msg::PointCloud2 & cloud_world,
+    const std::vector<GripperFilterBox> & gripper_boxes, const detector_core::PosePriors & priors,
+    visualization_msgs::msg::MarkerArray & markers, std::size_t & gripper_points_removed);
+
+  // The RGB edge-prior sync/validity gate and scorer construction. The
+  // returned scorer may close over `rgb_prior_storage` by reference -- that
+  // storage must outlive every use of the returned scorer (i.e. it must be
+  // owned by discover()'s own frame, not by a temporary).
+  RgbPriorOutcome compute_rgb_prior(
+    const std_msgs::msg::Header & cloud_header, const std::vector<GripperFilterBox> & gripper_boxes,
+    const sensor_msgs::msg::Image::ConstSharedPtr & rgb,
+    const sensor_msgs::msg::CameraInfo::ConstSharedPtr & camera_info,
+    std::optional<RgbEdgePrior> & rgb_prior_storage);
+
+  // Converts detection.hypotheses into the response BlockArray, appending
+  // the primary pose/marker output for each.
+  concrete_block_world_model_interfaces::msg::BlockArray build_block_array(
+    const std_msgs::msg::Header & header, const detector_core::DetectionResult & detection,
+    geometry_msgs::msg::PoseArray & poses, visualization_msgs::msg::MarkerArray & markers);
+
+  // All of discover()'s debug-only outlets: candidate markers, the replay
+  // RGB image, and the diagnostics JSON.
+  void publish_debug(
+    const std_msgs::msg::Header & header, const std::vector<GripperFilterBox> & gripper_boxes,
+    const detector_core::PosePriors & priors, const detector_core::DetectionResult & detection,
+    std::size_t request_prior_count, std::size_t gripper_points_removed,
+    const RgbPriorOutcome & rgb_outcome, const sensor_msgs::msg::Image::ConstSharedPtr & rgb);
+
   void rgb_callback(const sensor_msgs::msg::Image::ConstSharedPtr image);
   void camera_info_callback(const sensor_msgs::msg::CameraInfo::ConstSharedPtr camera_info);
 
