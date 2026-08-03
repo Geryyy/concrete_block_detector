@@ -147,3 +147,10 @@ source-tree include path is supported:
 colcon build --packages-select concrete_block_detector \
   --cmake-args -DCMAKE_PREFIX_PATH=/path/to/blockpose-core-install
 ```
+
+The PZS100 self-filter is also owned by this shared core.  The node only
+resolves the configured K9 → K10-left-rail and K11 → K12-right-rail TF pairs;
+Blockpose builds the two outward-facing exclusion boxes and filters the cloud.
+The same box builder is used by the offline snapshot runner and exposed as
+`blockpose._core.pzs100_filter_boxes` / `filter_pzs100_gripper` for standalone
+evaluation.

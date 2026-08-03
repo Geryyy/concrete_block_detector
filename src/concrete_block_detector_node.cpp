@@ -65,14 +65,6 @@ detector_core::Point transform_point(
     transform.translation.x, transform.translation.y, transform.translation.z);
 }
 
-detector_core::Point transform_direction(
-  const geometry_msgs::msg::TransformStamped & world_from_frame,
-  const detector_core::Point & direction_in_frame)
-{
-  const auto & rotation = world_from_frame.transform.rotation;
-  return Eigen::Quaterniond(rotation.w, rotation.x, rotation.y, rotation.z).normalized() * direction_in_frame;
-}
-
 Eigen::Isometry3d isometry_from_transform(const geometry_msgs::msg::TransformStamped & transform)
 {
   const auto & value = transform.transform;
@@ -361,13 +353,9 @@ ConcreteBlockDetectorNode::ConcreteBlockDetectorNode(const rclcpp::NodeOptions &
     gripper_self_filter_rails_.push_back(std::move(config));
   }
   if (gripper_self_filter_enabled_) {
-    if (!std::isfinite(gripper_self_filter_outboard_extent_m_) ||
-      !std::isfinite(gripper_self_filter_cross_rail_extent_m_) ||
-      !std::isfinite(gripper_self_filter_rail_end_margin_m_) ||
-      gripper_self_filter_outboard_extent_m_ <= 0.0 ||
-      gripper_self_filter_cross_rail_extent_m_ <= 0.0 || gripper_self_filter_rail_end_margin_m_ < 0.0) {
-      throw std::invalid_argument("gripper self-filter box extents must be finite and positive");
-    }
+    detector_core::validate_pzs100_self_filter_parameters({
+      gripper_self_filter_outboard_extent_m_, gripper_self_filter_cross_rail_extent_m_,
+      gripper_self_filter_rail_end_margin_m_});
     for (const auto & rail : gripper_self_filter_rails_) {
       if (rail.parent_frame.empty() || rail.rail_frame.empty() || rail.outward_axis_local.norm() <= 1e-9) {
         throw std::invalid_argument("enabled gripper self-filter requires parent, rail, and outward-axis configuration");
@@ -477,6 +465,9 @@ void ConcreteBlockDetectorNode::cloud_callback(const sensor_msgs::msg::PointClou
     }
   }
   if (gripper_self_filter_enabled_) {
+    const detector_core::Pzs100SelfFilterParameters filter_parameters{
+      gripper_self_filter_outboard_extent_m_, gripper_self_filter_cross_rail_extent_m_,
+      gripper_self_filter_rail_end_margin_m_};
     for (const auto & rail : gripper_self_filter_rails_) {
       try {
         const auto world_from_parent = tf_buffer_.lookupTransform(
@@ -485,36 +476,25 @@ void ConcreteBlockDetectorNode::cloud_callback(const sensor_msgs::msg::PointClou
         const auto world_from_rail = tf_buffer_.lookupTransform(
           world_frame_, rail.rail_frame, cloud->header.stamp,
           tf2::durationFromSec(transform_timeout_s_));
-        const auto rail_start = transform_point(world_from_parent, detector_core::Point::Zero());
-        const auto rail_end = transform_point(world_from_rail, detector_core::Point::Zero());
-        const auto rail_axis = rail_end - rail_start;
-        const double rail_length = rail_axis.norm();
-        if (rail_length <= 1e-9) {throw std::invalid_argument("gripper rail TF endpoints coincide");}
-        const auto rail_direction = rail_axis / rail_length;
-        auto outward = transform_direction(world_from_parent, rail.outward_axis_local);
-        outward -= rail_direction * outward.dot(rail_direction);
-        const double outward_length = outward.norm();
-        if (outward_length <= 1e-9) {throw std::invalid_argument("gripper outward axis is parallel to rail");}
-        outward /= outward_length;
-        const auto cross_rail = rail_direction.cross(outward).normalized();
-        Eigen::Matrix3d rotation;
-        rotation.col(0) = rail_direction;
-        rotation.col(1) = outward;
-        rotation.col(2) = cross_rail;
-        GripperFilterBox filter_box;
-        filter_box.rail_start = rail_start;
-        filter_box.rail_end = rail_end;
-        filter_box.outward_normal = outward;
-        filter_box.box.center = (rail_start + rail_end) * 0.5 + outward * (gripper_self_filter_outboard_extent_m_ * 0.5);
-        filter_box.box.rotation = rotation;
-        filter_box.box.size = detector_core::Point(
-          rail_length + 2.0 * gripper_self_filter_rail_end_margin_m_,
-          gripper_self_filter_outboard_extent_m_, gripper_self_filter_cross_rail_extent_m_);
-        gripper_boxes.push_back(std::move(filter_box));
+        detector_core::Pzs100RailPose rail_pose;
+        rail_pose.parent_position = transform_point(world_from_parent, detector_core::Point::Zero());
+        rail_pose.rail_position = transform_point(world_from_rail, detector_core::Point::Zero());
+        const auto & parent_rotation = world_from_parent.transform.rotation;
+        rail_pose.world_from_parent_rotation = Eigen::Quaterniond(
+          parent_rotation.w, parent_rotation.x, parent_rotation.y, parent_rotation.z).
+          normalized().toRotationMatrix();
+        rail_pose.outward_axis_parent = rail.outward_axis_local;
+        gripper_boxes.push_back(
+          detector_core::make_pzs100_gripper_filter_box(rail_pose, filter_parameters));
       } catch (const tf2::TransformException & error) {
         RCLCPP_WARN_THROTTLE(
           get_logger(), *get_clock(), 5000,
           "Gripper self-filter skipped rail '%s' -> '%s': no world TF at cloud stamp: %s",
+          rail.parent_frame.c_str(), rail.rail_frame.c_str(), error.what());
+      } catch (const std::invalid_argument & error) {
+        RCLCPP_WARN_THROTTLE(
+          get_logger(), *get_clock(), 5000,
+          "Gripper self-filter skipped rail '%s' -> '%s': invalid FK geometry: %s",
           rail.parent_frame.c_str(), rail.rail_frame.c_str(), error.what());
       }
     }

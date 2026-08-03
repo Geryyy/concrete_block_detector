@@ -37,13 +37,9 @@ struct GripperRailBoxConfig
   detector_core::Point outward_axis_local{detector_core::Point::UnitZ()};
 };
 
-struct GripperFilterBox
-{
-  detector_core::OrientedBox box;
-  detector_core::Point rail_start{detector_core::Point::Zero()};
-  detector_core::Point rail_end{detector_core::Point::Zero()};
-  detector_core::Point outward_normal{detector_core::Point::UnitZ()};
-};
+// The PZS100 rail-to-outboard-box geometry belongs to the portable Blockpose
+// core.  This ROS package resolves the named TF frames and renders the result.
+using GripperFilterBox = detector_core::Pzs100GripperFilterBox;
 
 struct FkPosePriorConfig
 {
