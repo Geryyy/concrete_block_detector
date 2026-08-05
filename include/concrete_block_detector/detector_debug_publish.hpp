@@ -82,6 +82,15 @@ visualization_msgs::msg::MarkerArray build_debug_candidate_markers(
   const detector_core::PosePriors & priors, const detector_core::DetectionResult & detection,
   bool publish_rejected_candidates);
 
+// Wireframe of the configured scene-bounds crop. Latched once at startup
+// rather than per request: the box is static configuration, and publishing it
+// transient-local means RViz shows it before any discovery has run. Sized in
+// the world frame, so it is directly comparable with the input_cloud outlet.
+visualization_msgs::msg::Marker make_scene_bounds_marker(
+  const std_msgs::msg::Header & header,
+  const std::array<double, 3> & min_m,
+  const std::array<double, 3> & max_m);
+
 // The `cbp.scene_discovery.debug/v1` diagnostics report: module gates,
 // pipeline counts, and per-stage candidate lineage.
 std_msgs::msg::String build_diagnostics_message(

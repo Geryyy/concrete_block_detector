@@ -222,6 +222,45 @@ visualization_msgs::msg::Marker make_stage_text(
   return marker;
 }
 
+visualization_msgs::msg::Marker make_scene_bounds_marker(
+  const std_msgs::msg::Header & header,
+  const std::array<double, 3> & min_m,
+  const std::array<double, 3> & max_m)
+{
+  visualization_msgs::msg::Marker marker;
+  marker.header = header;
+  marker.ns = "scene_bounds";
+  marker.id = 0;
+  marker.type = visualization_msgs::msg::Marker::LINE_LIST;
+  marker.action = visualization_msgs::msg::Marker::ADD;
+  marker.pose.orientation.w = 1.0;
+  marker.scale.x = 0.05;
+  marker.color.r = 1.0F;
+  marker.color.g = 0.25F;
+  marker.color.b = 0.85F;
+  marker.color.a = 0.9F;
+
+  // Corner i takes max on axis a when bit a of i is set.
+  const auto corner = [&min_m, &max_m](int index) {
+      geometry_msgs::msg::Point point;
+      point.x = ((index & 1) != 0) ? max_m[0] : min_m[0];
+      point.y = ((index & 2) != 0) ? max_m[1] : min_m[1];
+      point.z = ((index & 4) != 0) ? max_m[2] : min_m[2];
+      return point;
+    };
+  // The 12 edges of the box: pairs differing in exactly one bit.
+  constexpr std::array<std::array<int, 2>, 12> kEdges{{
+    {{0, 1}}, {{0, 2}}, {{0, 4}}, {{1, 3}}, {{1, 5}}, {{2, 3}},
+    {{2, 6}}, {{3, 7}}, {{4, 5}}, {{4, 6}}, {{5, 7}}, {{6, 7}}
+  }};
+  marker.points.reserve(kEdges.size() * 2U);
+  for (const auto & edge : kEdges) {
+    marker.points.push_back(corner(edge[0]));
+    marker.points.push_back(corner(edge[1]));
+  }
+  return marker;
+}
+
 visualization_msgs::msg::MarkerArray build_debug_candidate_markers(
   const std_msgs::msg::Header & header, const std::vector<GripperFilterBox> & gripper_boxes,
   const detector_core::PosePriors & priors, const detector_core::DetectionResult & detection,

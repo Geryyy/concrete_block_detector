@@ -387,6 +387,10 @@ ConcreteBlockDetectorNode::ConcreteBlockDetectorNode(const rclcpp::NodeOptions &
       debug_diagnostics_pub_ = create_publisher<std_msgs::msg::String>(
         debug_.topic_prefix + "/diagnostics", debug_qos);
     }
+    if (debug_.publish_markers && scene_bounds_enabled_) {
+      debug_scene_bounds_pub_ = create_publisher<visualization_msgs::msg::Marker>(
+        debug_.topic_prefix + "/scene_bounds", debug_qos);
+    }
   }
   // Preserve the selected replay image as a debug outlet even when the RGB
   // scorer is disabled for an ablation.
@@ -411,6 +415,19 @@ void ConcreteBlockDetectorNode::start()
     std::bind(&ConcreteBlockDetectorNode::cloud_callback, this, std::placeholders::_1),
     point_cloud_transport_name_, rclcpp::SensorDataQoS().get_rmw_qos_profile(), options);
   RCLCPP_INFO(get_logger(), "Concrete block discovery: points (%s transport) -> %s-frame cached snapshots", point_cloud_transport_name_.c_str(), world_frame_.c_str());
+  if (debug_scene_bounds_pub_) {
+    std_msgs::msg::Header header;
+    header.frame_id = world_frame_;
+    header.stamp = now();
+    debug_scene_bounds_pub_->publish(
+      make_scene_bounds_marker(header, scene_bounds_min_m_, scene_bounds_max_m_));
+    RCLCPP_INFO(
+      get_logger(),
+      "Scene bounds crop active: x[%.2f, %.2f] y[%.2f, %.2f] z[%.2f, %.2f] in %s",
+      scene_bounds_min_m_[0], scene_bounds_max_m_[0], scene_bounds_min_m_[1],
+      scene_bounds_max_m_[1], scene_bounds_min_m_[2], scene_bounds_max_m_[2],
+      world_frame_.c_str());
+  }
 }
 
 void ConcreteBlockDetectorNode::rgb_callback(const sensor_msgs::msg::Image::ConstSharedPtr image)

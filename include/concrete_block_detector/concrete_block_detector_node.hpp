@@ -192,6 +192,8 @@ private:
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr debug_above_ground_cloud_pub_;
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr debug_rgb_input_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr debug_diagnostics_pub_;
+  // Latched: the crop is static configuration, published once in start().
+  rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr debug_scene_bounds_pub_;
   rclcpp::Service<concrete_block_world_model_interfaces::srv::DiscoverBlocks>::SharedPtr
     discover_blocks_srv_;
   std::mutex cached_cloud_mutex_;
