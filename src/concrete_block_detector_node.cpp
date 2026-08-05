@@ -561,7 +561,8 @@ void ConcreteBlockDetectorNode::handle_discover_blocks(const std::shared_ptr<con
   }
   try {
     response->blocks = discover(
-      *cloud, *sensor_context, gripper_boxes, priors, request_prior_count, rgb, camera_info);
+      *cloud, *sensor_context, gripper_boxes, priors, request_prior_count, rgb, camera_info,
+      response->ground_height_m);
     response->success = true;
     response->message = "Discovered " + std::to_string(response->blocks.blocks.size()) + " block(s).";
   } catch (const std::exception & error) {response->success = false; response->message = std::string("Discovery failed: ") + error.what(); RCLCPP_ERROR(get_logger(), "%s", response->message.c_str());}
@@ -752,7 +753,8 @@ concrete_block_world_model_interfaces::msg::BlockArray ConcreteBlockDetectorNode
   const detector_core::PosePriors & priors,
   std::size_t request_prior_count,
   const sensor_msgs::msg::Image::ConstSharedPtr & rgb,
-  const sensor_msgs::msg::CameraInfo::ConstSharedPtr & camera_info)
+  const sensor_msgs::msg::CameraInfo::ConstSharedPtr & camera_info,
+  double & ground_height_m)
 {
   geometry_msgs::msg::PoseArray poses; poses.header = cloud_world.header;
   visualization_msgs::msg::MarkerArray markers; visualization_msgs::msg::Marker clear; clear.header = cloud_world.header; clear.action = visualization_msgs::msg::Marker::DELETEALL; markers.markers.push_back(clear);
@@ -770,6 +772,19 @@ concrete_block_world_model_interfaces::msg::BlockArray ConcreteBlockDetectorNode
   RCLCPP_INFO(
     get_logger(), "Scene discovery input: %zu point(s), gripper self-filter removed %zu point(s) using %zu rail box(es), %zu pose prior(s)",
     points.size() + gripper_points_removed, gripper_points_removed, gripper_boxes.size(), priors.size());
+  // Free side effect of the ground-plane fit `detection` already computed:
+  // report the local support height near the scene centroid so callers that
+  // just want "what's the ground z here" (e.g. wall-origin setup) don't need
+  // their own ground-fitting pass. Single scalar, locally-planar assumption
+  // -- not a terrain map.
+  if (points.empty()) {
+    ground_height_m = std::numeric_limits<double>::quiet_NaN();
+  } else {
+    detector_core::Point centroid = detector_core::Point::Zero();
+    for (const auto & point : points) {centroid += point;}
+    centroid /= static_cast<double>(points.size());
+    ground_height_m = detection.ground.support_z(centroid);
+  }
   poses_pub_->publish(poses); markers_pub_->publish(markers); return result;
 }
 }  // namespace concrete_block_detector

@@ -113,7 +113,8 @@ private:
     const detector_core::PosePriors & priors,
     std::size_t request_prior_count,
     const sensor_msgs::msg::Image::ConstSharedPtr & rgb,
-    const sensor_msgs::msg::CameraInfo::ConstSharedPtr & camera_info);
+    const sensor_msgs::msg::CameraInfo::ConstSharedPtr & camera_info,
+    double & ground_height_m);
 
   // discover()'s stages, in the order discover() runs them. Each is pure
   // plumbing over its arguments and this node's config/publishers -- none of
