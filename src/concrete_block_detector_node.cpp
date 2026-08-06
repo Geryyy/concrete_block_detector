@@ -391,6 +391,13 @@ ConcreteBlockDetectorNode::ConcreteBlockDetectorNode(const rclcpp::NodeOptions &
       debug_scene_bounds_pub_ = create_publisher<visualization_msgs::msg::Marker>(
         debug_.topic_prefix + "/scene_bounds", debug_qos);
     }
+    if (debug_.publish_markers) {
+      // Transient-local like the other debug outlets: the terrain is refit on
+      // every discovery, and latching keeps the last one on screen so it can be
+      // compared against wall-plan block markers between replays.
+      debug_ground_cells_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>(
+        debug_.topic_prefix + "/ground_cells", debug_qos);
+    }
   }
   // Preserve the selected replay image as a debug outlet even when the RGB
   // scorer is disabled for an ablation.
@@ -579,7 +586,7 @@ void ConcreteBlockDetectorNode::handle_discover_blocks(const std::shared_ptr<con
   try {
     response->blocks = discover(
       *cloud, *sensor_context, gripper_boxes, priors, request_prior_count, rgb, camera_info,
-      response->ground_height_m);
+      response->ground_height_m, response->ground_model);
     response->success = true;
     response->message = "Discovered " + std::to_string(response->blocks.blocks.size()) + " block(s).";
   } catch (const std::exception & error) {response->success = false; response->message = std::string("Discovery failed: ") + error.what(); RCLCPP_ERROR(get_logger(), "%s", response->message.c_str());}
@@ -771,7 +778,8 @@ concrete_block_world_model_interfaces::msg::BlockArray ConcreteBlockDetectorNode
   std::size_t request_prior_count,
   const sensor_msgs::msg::Image::ConstSharedPtr & rgb,
   const sensor_msgs::msg::CameraInfo::ConstSharedPtr & camera_info,
-  double & ground_height_m)
+  double & ground_height_m,
+  concrete_block_world_model_interfaces::msg::GroundModel & ground_model)
 {
   geometry_msgs::msg::PoseArray poses; poses.header = cloud_world.header;
   visualization_msgs::msg::MarkerArray markers; visualization_msgs::msg::Marker clear; clear.header = cloud_world.header; clear.action = visualization_msgs::msg::Marker::DELETEALL; markers.markers.push_back(clear);
@@ -801,6 +809,13 @@ concrete_block_world_model_interfaces::msg::BlockArray ConcreteBlockDetectorNode
     for (const auto & point : points) {centroid += point;}
     centroid /= static_cast<double>(points.size());
     ground_height_m = detection.ground.support_z(centroid);
+  }
+  // The spatially varying form of the same fit, for callers that need terrain
+  // height away from the centroid (e.g. per-block wall-plan height correction).
+  ground_model = ground_model_message(detection.ground, !points.empty());
+  if (debug_ground_cells_pub_) {
+    debug_ground_cells_pub_->publish(
+      make_ground_cell_markers(cloud_world.header, detection.ground));
   }
   poses_pub_->publish(poses); markers_pub_->publish(markers); return result;
 }

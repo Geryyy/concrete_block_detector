@@ -12,6 +12,7 @@
 #include <sensor_msgs/msg/camera_info.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <concrete_block_world_model_interfaces/msg/block_array.hpp>
+#include <concrete_block_world_model_interfaces/msg/ground_model.hpp>
 #include <concrete_block_world_model_interfaces/srv/discover_blocks.hpp>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
@@ -114,7 +115,8 @@ private:
     std::size_t request_prior_count,
     const sensor_msgs::msg::Image::ConstSharedPtr & rgb,
     const sensor_msgs::msg::CameraInfo::ConstSharedPtr & camera_info,
-    double & ground_height_m);
+    double & ground_height_m,
+    concrete_block_world_model_interfaces::msg::GroundModel & ground_model);
 
   // discover()'s stages, in the order discover() runs them. Each is pure
   // plumbing over its arguments and this node's config/publishers -- none of
@@ -194,6 +196,7 @@ private:
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr debug_diagnostics_pub_;
   // Latched: the crop is static configuration, published once in start().
   rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr debug_scene_bounds_pub_;
+  rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr debug_ground_cells_pub_;
   rclcpp::Service<concrete_block_world_model_interfaces::srv::DiscoverBlocks>::SharedPtr
     discover_blocks_srv_;
   std::mutex cached_cloud_mutex_;

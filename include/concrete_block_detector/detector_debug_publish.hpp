@@ -91,6 +91,19 @@ visualization_msgs::msg::Marker make_scene_bounds_marker(
   const std::array<double, 3> & min_m,
   const std::array<double, 3> & max_m);
 
+// The local ground model as wire data, so consumers (e.g. the wall plan
+// server's per-block height correction) can evaluate terrain height at an
+// arbitrary (x, y) instead of re-fitting their own ground plane.
+concrete_block_world_model_interfaces::msg::GroundModel ground_model_message(
+  const detector_core::LocalGroundModel & ground, bool valid);
+
+// One flat tile per *occupied* terrain cell, at that cell's fitted height,
+// colour-ramped over the observed height range. Deliberately not a resampled
+// surface: the gaps are the cells with no support, where the model falls back
+// to the bare plane, and seeing them is the point of the display.
+visualization_msgs::msg::MarkerArray make_ground_cell_markers(
+  const std_msgs::msg::Header & header, const detector_core::LocalGroundModel & ground);
+
 // The `cbp.scene_discovery.debug/v1` diagnostics report: module gates,
 // pipeline counts, and per-stage candidate lineage.
 std_msgs::msg::String build_diagnostics_message(

@@ -261,6 +261,86 @@ visualization_msgs::msg::Marker make_scene_bounds_marker(
   return marker;
 }
 
+concrete_block_world_model_interfaces::msg::GroundModel ground_model_message(
+  const detector_core::LocalGroundModel & ground, bool valid)
+{
+  concrete_block_world_model_interfaces::msg::GroundModel message;
+  message.valid = valid;
+  message.plane_normal.x = ground.normal.x();
+  message.plane_normal.y = ground.normal.y();
+  message.plane_normal.z = ground.normal.z();
+  message.plane_offset = ground.offset;
+  message.plane_source = ground.source;
+  message.cell_size = ground.cell_size;
+  message.cell_ix.reserve(ground.cell_z.size());
+  message.cell_iy.reserve(ground.cell_z.size());
+  message.cell_z.reserve(ground.cell_z.size());
+  for (const auto & cell : ground.cell_z) {
+    message.cell_ix.push_back(cell.first.first);
+    message.cell_iy.push_back(cell.first.second);
+    message.cell_z.push_back(cell.second);
+  }
+  return message;
+}
+
+visualization_msgs::msg::MarkerArray make_ground_cell_markers(
+  const std_msgs::msg::Header & header, const detector_core::LocalGroundModel & ground)
+{
+  visualization_msgs::msg::MarkerArray markers;
+  visualization_msgs::msg::Marker clear;
+  clear.header = header;
+  clear.ns = "ground_cells";
+  clear.action = visualization_msgs::msg::Marker::DELETEALL;
+  markers.markers.push_back(clear);
+  if (ground.cell_z.empty()) {
+    return markers;
+  }
+
+  // One CUBE_LIST carries every tile: per-cell colour lives in `colors`, so
+  // the whole terrain costs a single marker regardless of scene size.
+  visualization_msgs::msg::Marker tiles;
+  tiles.header = header;
+  tiles.ns = "ground_cells";
+  tiles.id = 0;
+  tiles.type = visualization_msgs::msg::Marker::CUBE_LIST;
+  tiles.action = visualization_msgs::msg::Marker::ADD;
+  tiles.pose.orientation.w = 1.0;
+  // Slightly undersized in x/y so cell edges stay visible as a grid; thin in z
+  // so a block resting on the terrain reads as touching rather than sunk.
+  tiles.scale.x = ground.cell_size * 0.92;
+  tiles.scale.y = ground.cell_size * 0.92;
+  tiles.scale.z = 0.02;
+  tiles.color.a = 1.0F;
+
+  auto [low, high] = std::minmax_element(
+    ground.cell_z.begin(), ground.cell_z.end(),
+    [](const auto & a, const auto & b) {return a.second < b.second;});
+  const double min_z = low->second;
+  const double span = std::max(high->second - min_z, 1e-3);
+
+  tiles.points.reserve(ground.cell_z.size());
+  tiles.colors.reserve(ground.cell_z.size());
+  for (const auto & cell : ground.cell_z) {
+    geometry_msgs::msg::Point point;
+    point.x = (static_cast<double>(cell.first.first) + 0.5) * ground.cell_size;
+    point.y = (static_cast<double>(cell.first.second) + 0.5) * ground.cell_size;
+    point.z = cell.second;
+    tiles.points.push_back(point);
+
+    // Blue (low) -> cyan -> yellow -> red (high): monotone in luminance, so it
+    // still reads as a height ramp on a greyscale screenshot.
+    const auto fraction = static_cast<float>((cell.second - min_z) / span);
+    std_msgs::msg::ColorRGBA color;
+    color.r = std::clamp(fraction * 2.0F - 0.6F, 0.0F, 1.0F);
+    color.g = std::clamp(1.6F - std::abs(fraction - 0.45F) * 3.0F, 0.0F, 1.0F);
+    color.b = std::clamp(1.0F - fraction * 2.0F, 0.0F, 1.0F);
+    color.a = 0.85F;
+    tiles.colors.push_back(color);
+  }
+  markers.markers.push_back(tiles);
+  return markers;
+}
+
 visualization_msgs::msg::MarkerArray build_debug_candidate_markers(
   const std_msgs::msg::Header & header, const std::vector<GripperFilterBox> & gripper_boxes,
   const detector_core::PosePriors & priors, const detector_core::DetectionResult & detection,
