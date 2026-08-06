@@ -14,14 +14,14 @@ def generate_launch_description():
             [FindPackageShare("concrete_block_detector"), "config", "detector.yaml"]
         ),
     )
+    # Overlay slot for a workcell or bag that must deviate from detector.yaml;
+    # it loads second and wins per parameter.  Defaults to re-loading the base
+    # config, which is a no-op -- a separate defaults file here used to override
+    # detector.yaml's own evidence gate, which is the opposite of a default.
     scene_discovery_params = DeclareLaunchArgument(
         "scene_discovery_params",
         default_value=PathJoinSubstitution(
-            [
-                FindPackageShare("concrete_block_detector"),
-                "config",
-                "scene_discovery_defaults.yaml",
-            ]
+            [FindPackageShare("concrete_block_detector"), "config", "detector.yaml"]
         ),
     )
     points_topic = DeclareLaunchArgument("points_topic", default_value="/seyond/points")

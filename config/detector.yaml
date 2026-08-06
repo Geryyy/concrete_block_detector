@@ -6,31 +6,102 @@ concrete_block_detector:
     discover_service: ~/discover_blocks
     refine_enabled: true
 
+    # Independent switches for ablations.  Leave the numerical configuration
+    # below intact: `false` makes that module a true no-op and records it as
+    # disabled in /cbp/debug/scene_discovery/detector/diagnostics.
+    modules:
+      sdf_refinement: {enabled: true}
+      gripper_self_filter: {enabled: true}
+      priors:
+        fk: {enabled: true}
+        request: {enabled: true}
+      rgb_edge_prior: {enabled: true}
+
     # Pose priors are optional evidence, never synthetic detections.  The core
     # accepts the same prior form from FK, RGB, a wall plan, or registered
     # blocks; this local adapter supplies only the FK variant.
     pose_priors:
       fk:
-        tcp_frame: ""
-        tcp_to_block_xyz: [0.0, 0.0, 0.0]
-        tcp_to_block_rpy: [0.0, 0.0, 0.0]
-        weight: 0.0
-        translation_tolerance_m: 0.30
+        # Timestamped FK resolves the 90-degree / roll ambiguity for a block
+        # in the PZS100. It only re-ranks geometry-supported candidates; a TF
+        # failure or an absent block leaves normal scene discovery unchanged.
+        tcp_frame: elastic/K8_tool_center_point
+        tcp_to_block_xyz: [0.0, 0.0, 0.85]
+        tcp_to_block_rpy: [3.14159265, 0.0, 0.0]
+        weight: 0.35
+        translation_tolerance_m: 0.35
         orientation_tolerance_rad: 0.70
 
-    # Package defaults are portable. Use a workcell/bag overlay to enable a crop.
+    rgb_edge_prior:
+      # Optional classical RGB tie-breaker for overlapping geometric cuboid
+      # hypotheses. Missing/stale RGB, camera calibration, or TF is a no-op.
+      # Enabling this subscribes to the image stream regardless of
+      # debug.publish_rgb_input -- the scorer needs the frames itself.
+      enabled: true
+      image_topic: /blackfly_rotated/image_rect
+      camera_info_topic: /blackfly_rotated/camera_info
+      max_sync_delta_s: 0.08
+      weight: 0.05
+      max_image_dimension_px: 768
+
+    gripper_self_filter:
+      # Gripper-side clutter merges with a block before cuboid proposal
+      # generation. The K9->K10 and K11->K12 FK lines form the inside faces of
+      # two outward-facing exclusion boxes. Sensor-ray evidence is unmodified.
+      # Inert until those rail frames exist, so it is harmless with the 7040
+      # mounted and becomes active as soon as the PZS100 is fitted.
+      enabled: true
+      publish_markers: true
+      # A box's local X follows parent->rail, local Y points outward, and
+      # local Z spans across the rail. Tune these while viewing the cyan boxes.
+      outboard_extent_m: 0.30
+      cross_rail_extent_m: 0.9
+      rail_end_margin_m: 0.0
+      left_rail:
+        parent_frame: elastic/K9
+        rail_frame: elastic/K10_left_rail
+        # Screenshot/FK: K9 local +Z points left, outboard of the gripper.
+        outward_axis_local: [0.0, 0.0, 1.0]
+      right_rail:
+        parent_frame: elastic/K11
+        rail_frame: elastic/K12_right_rail
+        # Screenshot/FK: K11 local +Z points right, outboard of the gripper.
+        outward_axis_local: [0.0, 0.0, 1.0]
+
+    # World-frame crop to the reachable workspace, applied before every other
+    # stage. Vegetation outside the working area produces single-face
+    # (POSE_COARSE) candidates that clear min_score and get associated into the
+    # world model; a block the crane cannot reach is not a block.  On by
+    # default so that a launch which forgets the workcell overlay fails safe --
+    # an overlay is still free to override any of these per parameter.
+    #
+    # Derived from the 101 approved ground-truth blocks in the 43 annotated
+    # captures under scene_discovery_capture{,_annotated} and
+    # blockpose/data/registration_snapshots. Their centre extents are
+    # x [-13.81, -10.81], y [-3.11, 2.81], z [0.37, 2.52]; the bounds below add
+    # the worst-case block half-diagonal under free yaw (0.541 m for a
+    # 0.9 x 0.6 footprint) plus roughly 0.5 m, leaving >= 0.57 m clearance to
+    # the nearest ground-truth block face on every side.
+    #
+    # z_min sits deliberately below ground: the pipeline RANSAC-fits the
+    # support plane and reports ground.support_z from these same points, so
+    # cropping at block level would remove the ground it needs.
+    # z_max clears a carried block (highest labelled centre 2.52 -> top 2.82).
+    #
+    # These are site coordinates, not portable defaults. Re-derive them from the
+    # labelled captures if the crane or the working area moves.
     scene_bounds:
-      enabled: false
-      min_m: [-15.0, 2.0, 0.0]
-      max_m: [-10.0, 3.5, 1.5]
+      enabled: true
+      min_m: [-15.0, -4.5, -0.5]
+      max_m: [-9.5, 4.0, 3.5]
 
     # Request-scoped debug outlets, published once per discovery under
     # topic_prefix with transient-local QoS, so the last discovery stays on
     # screen for a late-attaching RViz.  All six flags are spelled out rather
-    # than left to the C++ defaults: `enabled` alone switches on every outlet,
-    # and publish_rgb_input additionally creates the RGB image + camera_info
-    # subscriptions even though the RGB scorer is off -- a continuous stream,
-    # unlike everything else here, which is one-shot per discovery.
+    # than left to the C++ defaults: `enabled` alone switches on every outlet.
+    # publish_rgb_input only republishes the frame the scorer used; the image
+    # subscription itself comes from rgb_edge_prior above, so turning this off
+    # saves the republish, not the stream.
     debug:
       enabled: true
       publish_markers: true
@@ -38,6 +109,7 @@ concrete_block_detector:
       publish_diagnostics: true
       publish_rejected_candidates: true
       publish_rgb_input: false
+      topic_prefix: /cbp/debug/scene_discovery/detector
 
     # Candidate dimensions are flattened triples; an empty list means the
     # canonical block dimensions only.
@@ -66,7 +138,9 @@ concrete_block_detector:
       region_max_extent_xy: 3.0
       cluster_min_extent_z: 0.3
       cluster_max_extent_z: 3.5
-      cluster_max_center_z: 3.0
+      # Covers a two-block stack in the replay. The evidence threshold below
+      # still rejects the labelled elevated hardware-shaped false positive.
+      cluster_max_center_z: 1.5
       ransac_distance: 0.02
       ransac_iterations: 1000
       ransac_search_max_points: 2048
@@ -82,6 +156,22 @@ concrete_block_detector:
       refine_huber_scale: 0.05
       refine_max_translation: 0.15
       refine_max_rotation_deg: 20.0
-      min_score: 0.0
+      # Full-cloud, ray-aware evidence gate.  Matches blockpose's documented
+      # scene-discovery threshold. 0.45 rejects the only labelled elevated
+      # false positive while retaining every labelled block in the captures.
+      min_score: 0.45
+      # An FK-seeded pose may replace an overlapping geometric pose only when
+      # its independently measured cloud evidence improves by this margin.
+      fk_seed_min_evidence_gain: 0.15
+      # Let RANSAC separate true block-scale planes inside a component wider
+      # than one block. This recovers touching/stacked blocks; ordinary
+      # components retain the same proposal path.
+      fit_wide_proposals: true
+      # Scene discovery assumes loose blocks resting on support. Keep the
+      # plane-derived top direction if SDF is pulled away from gravity by
+      # gripper clutter; its refined translation and yaw are retained.
+      refine_preserve_top_axis_if_gravity_worsens: true
       conflict_alternatives: 1
-      proposal_max_components: 8
+      # The real scene contains more than eight valid clutter components.
+      # A labelled free block was otherwise truncated before plane fitting.
+      proposal_max_components: 16
