@@ -15,7 +15,10 @@ concrete_block_detector:
       priors:
         fk: {enabled: true}
         request: {enabled: true}
-      rgb_edge_prior: {enabled: true}
+      # Disabled for the field test: the RGB edge prior is an optional
+      # tie-breaker and this is its first live deployment. Re-enable once the
+      # path has been exercised off-crane.
+      rgb_edge_prior: {enabled: false}
 
     # Pose priors are optional evidence, never synthetic detections.  The core
     # accepts the same prior form from FK, RGB, a wall plan, or registered
