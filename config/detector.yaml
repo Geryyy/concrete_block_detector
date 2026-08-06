@@ -24,6 +24,21 @@ concrete_block_detector:
       min_m: [-15.0, 2.0, 0.0]
       max_m: [-10.0, 3.5, 1.5]
 
+    # Request-scoped debug outlets, published once per discovery under
+    # topic_prefix with transient-local QoS, so the last discovery stays on
+    # screen for a late-attaching RViz.  All six flags are spelled out rather
+    # than left to the C++ defaults: `enabled` alone switches on every outlet,
+    # and publish_rgb_input additionally creates the RGB image + camera_info
+    # subscriptions even though the RGB scorer is off -- a continuous stream,
+    # unlike everything else here, which is one-shot per discovery.
+    debug:
+      enabled: true
+      publish_markers: true
+      publish_clouds: true
+      publish_diagnostics: true
+      publish_rejected_candidates: true
+      publish_rgb_input: false
+
     # Candidate dimensions are flattened triples; an empty list means the
     # canonical block dimensions only.
     detector:
