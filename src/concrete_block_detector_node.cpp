@@ -122,8 +122,12 @@ cv::Mat gripper_occlusion_mask(
     std::vector<cv::Point> polygon;
     for (const auto & point : projected) {if (std::isfinite(point.x) && std::isfinite(point.y)) {polygon.emplace_back(cvRound(point.x), cvRound(point.y));}}
     if (polygon.size() < 3U) {continue;}
-    cv::convexHull(polygon, polygon);
-    cv::fillConvexPoly(mask, polygon, cv::Scalar(255), cv::LINE_8);
+    // convexHull asserts that input and output are distinct objects, so the
+    // hull cannot be computed in place.
+    std::vector<cv::Point> hull;
+    cv::convexHull(polygon, hull);
+    if (hull.size() < 3U) {continue;}
+    cv::fillConvexPoly(mask, hull, cv::Scalar(255), cv::LINE_8);
   }
   return mask;
 }
