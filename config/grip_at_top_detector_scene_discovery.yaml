@@ -1,0 +1,114 @@
+concrete_block_detector:
+  ros__parameters:
+    # Independent switches for replay ablations.  Leave the numerical
+    # configuration below intact: `false` makes that module a true no-op and
+    # records it as disabled in /cbp/debug/scene_discovery/detector/diagnostics.
+    modules:
+      sdf_refinement: {enabled: true}
+      gripper_self_filter: {enabled: true}
+      priors:
+        fk: {enabled: true}
+        request: {enabled: true}
+      rgb_edge_prior: {enabled: true}
+    debug:
+      # Detector-owned stage outputs.  The world model continues to own its
+      # final pose overlay; use these outlets to inspect module contributions.
+      enabled: true
+      publish_clouds: true
+      publish_markers: true
+      publish_diagnostics: true
+      publish_rgb_input: true
+      publish_rejected_candidates: true
+      topic_prefix: /cbp/debug/scene_discovery/detector
+    rgb_edge_prior:
+      # Optional classical RGB tie-breaker for overlapping geometric cuboid
+      # hypotheses. Missing/stale RGB, camera calibration, or TF is a no-op.
+      enabled: true
+      image_topic: /blackfly_rotated/image_rect
+      camera_info_topic: /blackfly_rotated/camera_info
+      max_sync_delta_s: 0.08
+      weight: 0.05
+      max_image_dimension_px: 768
+    pose_priors:
+      fk:
+        # Timestamped FK resolves the 90-degree / roll ambiguity for a block
+        # in the PZS100. It only re-ranks geometry-supported candidates; a TF
+        # failure or an absent block leaves normal scene discovery unchanged.
+        tcp_frame: elastic/K8_tool_center_point
+        tcp_to_block_xyz: [0.0, 0.0, 0.85]
+        tcp_to_block_rpy: [3.14159265, 0.0, 0.0]
+        weight: 0.35
+        translation_tolerance_m: 0.35
+        orientation_tolerance_rad: 0.70
+    scene_bounds:
+      # World-frame crop to the reachable workspace, applied before every other
+      # stage. Vegetation outside the working area was producing single-face
+      # (POSE_COARSE) candidates that cleared min_score and were associated into
+      # the world model; a block the crane cannot reach is not a block, so
+      # cropping is a statement about the workcell rather than about this bag.
+      #
+      # Derived from the 101 approved ground-truth blocks in the 43 annotated
+      # captures under scene_discovery_capture{,_annotated} and
+      # blockpose/data/registration_snapshots. Their centre extents are
+      # x [-13.81, -10.81], y [-3.11, 2.81], z [0.37, 2.52]; the bounds below
+      # add the worst-case block half-diagonal under free yaw (0.541 m for a
+      # 0.9 x 0.6 footprint) plus roughly 0.5 m, leaving >= 0.57 m clearance to
+      # the nearest ground-truth block face on every side. All 101 fit entirely
+      # inside.
+      #
+      # z_min sits deliberately below ground: the pipeline RANSAC-fits the
+      # support plane and reports ground.support_z from these same points, so
+      # cropping at block level would remove the ground it needs.
+      # z_max clears a carried block (highest labelled centre 2.52 -> top 2.82).
+      #
+      # These are site coordinates, not portable defaults. Re-derive them from
+      # the labelled captures if the crane or the working area moves.
+      enabled: true
+      min_m: [-15.0, -4.5, -0.5]
+      max_m: [-9.5, 4.0, 3.5]
+
+    detector:
+      # Full-cloud, ray-aware evidence gate.  Matches blockpose's documented
+      # scene-discovery threshold; no scene bounds or point filtering is used.
+      # The 0.45 threshold rejects the only labelled elevated false positive
+      # while retaining every labelled block in the replay captures.
+      min_score: 0.45
+      # An FK-seeded pose may replace an overlapping geometric pose only when
+      # its independently measured cloud evidence improves by this margin.
+      fk_seed_min_evidence_gain: 0.15
+      # Covers a two-block stack in the replay. The evidence threshold above
+      # still rejects the labelled elevated hardware-shaped false positive.
+      cluster_max_center_z: 1.5
+      # Let RANSAC separate true block-scale planes inside a component wider
+      # than one block. This recovers touching/stacked blocks; ordinary
+      # components retain the same proposal path.
+      fit_wide_proposals: true
+      # Scene discovery assumes loose blocks resting on support. Keep the
+      # plane-derived top direction if SDF is pulled away from gravity by
+      # gripper clutter; its refined translation and yaw are retained.
+      refine_preserve_top_axis_if_gravity_worsens: true
+      # The real replay contains more than eight valid clutter components.
+      # A labelled free block was otherwise truncated before plane fitting.
+      proposal_max_components: 16
+    gripper_self_filter:
+      # The missed labelled block in grip_at_top is merged with gripper-side
+      # clutter before cuboid proposal generation. The K9->K10 and K11->K12
+      # FK lines form the inside faces of two outward-facing exclusion boxes.
+      # Sensor-ray evidence stays unmodified.
+      enabled: true
+      publish_markers: true
+      # A box's local X follows parent->rail, local Y points outward, and
+      # local Z spans across the rail. Tune these while viewing the cyan boxes.
+      outboard_extent_m: 0.30
+      cross_rail_extent_m: 0.9
+      rail_end_margin_m: 0.0
+      left_rail:
+        parent_frame: elastic/K9
+        rail_frame: elastic/K10_left_rail
+        # Screenshot/FK: K9 local +Z points left, outboard of the gripper.
+        outward_axis_local: [0.0, 0.0, 1.0]
+      right_rail:
+        parent_frame: elastic/K11
+        rail_frame: elastic/K12_right_rail
+        # Screenshot/FK: K11 local +Z points right, outboard of the gripper.
+        outward_axis_local: [0.0, 0.0, 1.0]

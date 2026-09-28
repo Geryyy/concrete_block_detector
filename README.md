@@ -1,7 +1,8 @@
 # concrete_block_detector
 
-Point-cloud replacement for the legacy `concrete_block_perception` path in the
-wall-assembly stack. The C++ node discovers free concrete-block hypotheses from a
+The sole block-pose source in the wall-assembly stack: every world-model
+`run_pose_estimation` mode is one `DiscoverBlocks` call on this node. The C++
+node discovers free concrete-block hypotheses from a
 `sensor_msgs/PointCloud2`. It transforms each cloud to `world`, removes an
 upward-facing RANSAC ground plane, clusters the remaining points, and estimates
 each pose from a ground-constrained top slab. Partial faces are accepted only
@@ -90,7 +91,7 @@ overlay:
 ```bash
 ros2 run concrete_block_detector concrete_block_detector_snapshot_runner \
   --params /workspaces/ros2_baustelle_ws/src/concrete_block_stack/concrete_block_detector/config/detector.yaml \
-  --params /workspaces/ros2_baustelle_ws/src/concrete_block_stack/concrete_block_perception/config/grip_at_top_detector_scene_discovery.yaml \
+  --params /workspaces/ros2_baustelle_ws/src/concrete_block_stack/concrete_block_detector/config/grip_at_top_detector_scene_discovery.yaml \
   --snapshot /workspaces/ros2_baustelle_ws/src/concrete_block_stack/blockpose/data/registration_snapshots/1783428141_224458752_seq3
 ```
 

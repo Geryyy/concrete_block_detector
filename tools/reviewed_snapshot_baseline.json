@@ -4,11 +4,11 @@
   "detector_revision": "1dd50c2e85f31150d32d1963e38afaf39195f710",
   "parameter_files": [
     "config/detector.yaml",
-    "../concrete_block_perception/config/grip_at_top_detector_scene_discovery.yaml"
+    "config/grip_at_top_detector_scene_discovery.yaml"
   ],
   "parameter_file_sha256": {
     "config/detector.yaml": "f7b8204825b599ba45950b7c4d3055b46fc65db6ccfa1991c6f8165953167bba",
-    "../concrete_block_perception/config/grip_at_top_detector_scene_discovery.yaml": "17b00563766705c909111b67538f3a5de024d76b9d2cf60656e157002ee01d31"
+    "config/grip_at_top_detector_scene_discovery.yaml": "17b00563766705c909111b67538f3a5de024d76b9d2cf60656e157002ee01d31"
   },
   "input_provenance": {
     "snapshot_root": "../blockpose/data/registration_snapshots",
