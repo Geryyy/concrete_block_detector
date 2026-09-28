@@ -71,6 +71,10 @@ if(BUILD_TESTING)
     add_detector_core_test(test_detector_core_${name})
   endforeach()
 
+  ament_add_gtest(test_elevated_prior_gates test/test_elevated_prior_gates.cpp)
+  target_include_directories(test_elevated_prior_gates PRIVATE include)
+  target_link_libraries(test_elevated_prior_gates blockpose::core Eigen3::Eigen)
+
 endif()
 
 ament_package()

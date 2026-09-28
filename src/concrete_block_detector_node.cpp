@@ -1,5 +1,6 @@
 #include "concrete_block_detector/concrete_block_detector_node.hpp"
 #include "concrete_block_detector/detector_core_pipeline.hpp"
+#include "concrete_block_detector/elevated_prior_gates.hpp"
 #include "concrete_block_detector/detector_debug_publish.hpp"
 #include "concrete_block_detector/rgb_edge_prior.hpp"
 
@@ -226,6 +227,8 @@ ConcreteBlockDetectorNode::ConcreteBlockDetectorNode(const rclcpp::NodeOptions &
   detector_parameters_.cluster_min_extent_z = declare_parameter<double>("detector.cluster_min_extent_z", detector_parameters_.cluster_min_extent_z);
   detector_parameters_.cluster_max_extent_z = declare_parameter<double>("detector.cluster_max_extent_z", detector_parameters_.cluster_max_extent_z);
   detector_parameters_.cluster_max_center_z = declare_parameter<double>("detector.cluster_max_center_z", detector_parameters_.cluster_max_center_z);
+  elevated_prior_cluster_max_center_z_ = declare_parameter<double>(
+    "detector.elevated_prior_cluster_max_center_z", elevated_prior_cluster_max_center_z_);
   detector_parameters_.ransac_distance = declare_parameter<double>("detector.ransac_distance", detector_parameters_.ransac_distance);
   detector_parameters_.ransac_iterations = nonnegative_size("detector.ransac_iterations", detector_parameters_.ransac_iterations);
   detector_parameters_.ransac_search_max_points = nonnegative_size("detector.ransac_search_max_points", detector_parameters_.ransac_search_max_points);
@@ -792,8 +795,23 @@ concrete_block_world_model_interfaces::msg::BlockArray ConcreteBlockDetectorNode
   std::optional<RgbEdgePrior> rgb_prior;
   const auto rgb_outcome = compute_rgb_prior(cloud_world.header, gripper_boxes, rgb, camera_info, rgb_prior);
   const auto * scorer = rgb_outcome.visual_scorer ? &rgb_outcome.visual_scorer : nullptr;
-  const auto detection = refine_enabled_ ? detector_core::detect(points, detector_parameters_, &sensor_context, &priors, scorer) :
-    detector_core::detect_without_refinement(points, detector_parameters_, &sensor_context, &priors, scorer);
+  const auto parameters = parameters_for_request(
+    detector_parameters_, priors, request_prior_count, elevated_prior_cluster_max_center_z_);
+  if (parameters.cluster_max_center_z != detector_parameters_.cluster_max_center_z) {
+    RCLCPP_INFO(
+      get_logger(), "Elevated request prior: cluster_max_center_z %.2f -> %.2f m for this call",
+      detector_parameters_.cluster_max_center_z, parameters.cluster_max_center_z);
+  }
+  if (request_prior_dims_mismatch(detector_parameters_, priors, request_prior_count)) {
+    RCLCPP_WARN(
+      get_logger(),
+      "Request FK prior cannot seed: its dimensions differ from detector.block_dims "
+      "[%.3f %.3f %.3f]; the caller's block_dimensions_m must match exactly",
+      detector_parameters_.block_dims[0], detector_parameters_.block_dims[1],
+      detector_parameters_.block_dims[2]);
+  }
+  const auto detection = refine_enabled_ ? detector_core::detect(points, parameters, &sensor_context, &priors, scorer) :
+    detector_core::detect_without_refinement(points, parameters, &sensor_context, &priors, scorer);
   auto result = build_block_array(cloud_world.header, detection, poses, markers);
   publish_debug(
     cloud_world.header, gripper_boxes, priors, detection, request_prior_count, gripper_points_removed,

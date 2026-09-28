@@ -144,6 +144,14 @@ concrete_block_detector:
       # Covers a two-block stack in the replay. The evidence threshold below
       # still rejects the labelled elevated hardware-shaped false positive.
       cluster_max_center_z: 1.5
+      # The ceiling above assumes a block on the ground, which a block in the
+      # gripper is not: it drops a carried block after the prior already seeded
+      # and refined it. A request that names an elevated pose with an "fk"
+      # prior (REFINE_GRASPED) is answered with this ceiling instead. Measured
+      # on the carried-high captures: 8/8 recovered at 0.070 m from the FK
+      # prediction, where the shipped ceiling returns nothing. Scene discovery
+      # is unaffected -- the node's own FK prior does not trigger this.
+      elevated_prior_cluster_max_center_z: 3.0
       ransac_distance: 0.02
       ransac_iterations: 1000
       ransac_search_max_points: 2048

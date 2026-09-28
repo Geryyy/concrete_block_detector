@@ -181,6 +181,9 @@ private:
   RgbEdgePriorConfig rgb_edge_prior_;
   DetectorDebugConfig debug_;
   detector_core::DetectionParameters detector_parameters_;
+  // Ceiling used instead of cluster_max_center_z for a request that asks about a pose above
+  // it (elevated_prior_gates.hpp); measured on the carried-block captures.
+  double elevated_prior_cluster_max_center_z_{3.0};
 
   point_cloud_transport::Subscriber cloud_sub_;
   rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr rgb_sub_;
