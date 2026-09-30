@@ -32,6 +32,7 @@ namespace concrete_block_detector
 namespace
 {
 constexpr std::array<double, 3> kDefaultDims{{0.9, 0.6, 0.6}};
+constexpr double kMarkerLifetimeS = 2.0;  // one detection's debug view, then gone
 
 detector_core::PosePrior pose_prior_from_msg(
   const concrete_block_world_model_interfaces::msg::PosePrior & message)
@@ -838,6 +839,11 @@ concrete_block_world_model_interfaces::msg::BlockArray ConcreteBlockDetectorNode
   if (debug_ground_cells_pub_) {
     debug_ground_cells_pub_->publish(
       make_ground_cell_markers(cloud_world.header, detection.ground));
+  }
+  // Detection runs on demand, so without a lifetime the gripper boxes and priors of the last
+  // run stayed on screen as the crane moved on.
+  for (auto & marker : markers.markers) {
+    marker.lifetime = rclcpp::Duration::from_seconds(kMarkerLifetimeS);
   }
   poses_pub_->publish(poses); markers_pub_->publish(markers); return result;
 }
